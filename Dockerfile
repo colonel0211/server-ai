@@ -34,8 +34,8 @@ COPY src/ ./src/
 # Create necessary directories
 RUN mkdir -p temp uploads assets logs
 
-# Build TypeScript code
-RUN npm run build
+# Build TypeScript code (clean build without rimraf dependency)
+RUN rm -rf dist && npm run build:prod
 
 # Create non-root user for security
 RUN addgroup -g 1001 -S nodejs && \
