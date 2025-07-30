@@ -1,150 +1,141 @@
-// src/routes/health.ts - Minimal health check routes
 import { Router, Request, Response } from 'express';
-import { SupabaseService } from '../config/supabase';
+import { testDatabaseConnection, isSupabaseConfigured, getSupabaseStatus } from '../config/supabase';
 
 const router = Router();
 
-interface HealthStatus {
-  status: 'healthy' | 'unhealthy';
-  timestamp: string;
-  uptime: number;
-  version: string;
-  environment: string;
-  services: {
-    database: 'connected' | 'disconnected';
-    youtube: 'configured' | 'not_configured';
-    openai: 'configured' | 'not_configured';
-    ffmpeg: 'available' | 'unavailable';
-  };
-  memory: {
-    used: number;
-    total: number;
-    percentage: number;
-  };
-}
-
-// Health check endpoint
+// Basic health check
 router.get('/health', async (req: Request, res: Response): Promise<void> => {
   try {
-    const healthStatus: HealthStatus = {
+    const supabaseStatus = getSupabaseStatus();
+    
+    const healthCheck = {
       status: 'healthy',
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
-      version: process.env.npm_package_version || '1.0.0',
       environment: process.env.NODE_ENV || 'development',
+      version: process.env.npm_package_version || '1.0.0',
       services: {
-        database: 'disconnected',
-        youtube: 'not_configured',
-        openai: 'not_configured',
-        ffmpeg: 'unavailable'
-      },
-      memory: {
-        used: 0,
-        total: 0,
-        percentage: 0
+        database: { 
+          status: 'unknown', 
+          configured: supabaseStatus.configured,
+          details: supabaseStatus
+        },
+        youtube: { 
+          status: 'unknown', 
+          configured: !!process.env.YOUTUBE_API_KEY 
+        },
+        openai: { 
+          status: 'unknown', 
+          configured: !!process.env.OPENAI_API_KEY 
+        }
       }
     };
 
-    // Check database connection
-    try {
-      const isConnected = await SupabaseService.testConnection();
-      healthStatus.services.database = isConnected ? 'connected' : 'disconnected';
-    } catch (error) {
-      healthStatus.services.database = 'disconnected';
+    // Check database connection if configured
+    if (supabaseStatus.configured) {
+      try {
+        const dbResult = await testDatabaseConnection();
+        healthCheck.services.database.status = dbResult.connected ? 'healthy' : 'unhealthy';
+        if (dbResult.error) {
+          healthCheck.services.database = { 
+            ...healthCheck.services.database, 
+            error: dbResult.error 
+          };
+        }
+      } catch (error) {
+        healthCheck.services.database.status = 'error';
+        healthCheck.services.database = {
+          ...healthCheck.services.database,
+          error: error instanceof Error ? error.message : 'Database check failed'
+        };
+      }
+    } else {
+      healthCheck.services.database.status = 'not_configured';
     }
 
     // Check YouTube API configuration
-    healthStatus.services.youtube = process.env.YOUTUBE_API_KEY ? 'configured' : 'not_configured';
+    healthCheck.services.youtube.status = healthCheck.services.youtube.configured ? 'configured' : 'not_configured';
 
     // Check OpenAI configuration
-    healthStatus.services.openai = process.env.OPENAI_API_KEY ? 'configured' : 'not_configured';
+    healthCheck.services.openai.status = healthCheck.services.openai.configured ? 'configured' : 'not_configured';
 
-    // Check FFmpeg availability
-    try {
-      const { exec } = require('child_process');
-      await new Promise<void>((resolve, reject) => {
-        exec('ffmpeg -version', (error: any) => {
-          if (error) reject(error);
-          else resolve();
-        });
-      });
-      healthStatus.services.ffmpeg = 'available';
-    } catch (error) {
-      healthStatus.services.ffmpeg = 'unavailable';
+    // Determine overall status
+    const hasUnhealthyServices = Object.values(healthCheck.services).some(
+      service => service.status === 'unhealthy' || service.status === 'error'
+    );
+    
+    const hasUnconfiguredServices = Object.values(healthCheck.services).some(
+      service => service.status === 'not_configured'
+    );
+    
+    if (hasUnhealthyServices) {
+      healthCheck.status = 'unhealthy';
+      res.status(503).json(healthCheck);
+    } else if (hasUnconfiguredServices) {
+      healthCheck.status = 'degraded';
+      res.status(200).json(healthCheck); // Still return 200 for degraded but working
+    } else {
+      res.status(200).json(healthCheck);
     }
-
-    // Memory usage
-    const memUsage = process.memoryUsage();
-    healthStatus.memory = {
-      used: Math.round(memUsage.heapUsed / 1024 / 1024), // MB
-      total: Math.round(memUsage.heapTotal / 1024 / 1024), // MB
-      percentage: Math.round((memUsage.heapUsed / memUsage.heapTotal) * 100)
-    };
-
-    // Determine overall health
-    const isHealthy = 
-      healthStatus.services.database === 'connected' &&
-      healthStatus.services.youtube === 'configured' &&
-      healthStatus.services.ffmpeg === 'available' &&
-      healthStatus.memory.percentage < 90;
-
-    healthStatus.status = isHealthy ? 'healthy' : 'unhealthy';
-
-    // Return appropriate status code
-    const statusCode = isHealthy ? 200 : 503;
-    res.status(statusCode).json(healthStatus);
-
   } catch (error) {
-    console.error('Health check error:', error);
-    res.status(503).json({
-      status: 'unhealthy',
+    res.status(500).json({
+      status: 'error',
       timestamp: new Date().toISOString(),
-      error: 'Health check failed',
-      message: error instanceof Error ? error.message : 'Unknown error'
+      error: error instanceof Error ? error.message : 'Unknown health check error'
     });
   }
 });
 
-// Readiness probe
+// Readiness check for Kubernetes/Koyeb
 router.get('/ready', async (req: Request, res: Response): Promise<void> => {
   try {
-    const isDbReady = await SupabaseService.testConnection();
-    
-    if (!isDbReady) {
-      res.status(503).json({
-        ready: false,
-        message: 'Database not ready'
-      });
-      return;
-    }
-
-    if (!process.env.YOUTUBE_API_KEY) {
-      res.status(503).json({
-        ready: false,
-        message: 'YouTube API not configured'
-      });
-      return;
-    }
-
-    res.json({
-      ready: true,
-      timestamp: new Date().toISOString()
+    // App is ready if it can start (basic server functionality)
+    // Don't require all services to be configured for readiness
+    res.status(200).json({
+      status: 'ready',
+      timestamp: new Date().toISOString(),
+      message: 'Server is ready to accept requests'
     });
-
   } catch (error) {
     res.status(503).json({
-      ready: false,
-      error: error instanceof Error ? error.message : 'Unknown error'
+      status: 'not_ready',
+      timestamp: new Date().toISOString(),
+      error: error instanceof Error ? error.message : 'Unknown readiness error'
     });
   }
 });
 
-// Liveness probe
+// Liveness check
 router.get('/live', (req: Request, res: Response): void => {
-  res.json({
-    alive: true,
+  res.status(200).json({
+    status: 'alive',
     timestamp: new Date().toISOString(),
-    uptime: process.uptime()
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    pid: process.pid
+  });
+});
+
+// Configuration status endpoint
+router.get('/config', (req: Request, res: Response): void => {
+  const supabaseStatus = getSupabaseStatus();
+  
+  res.status(200).json({
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development',
+    services: {
+      supabase: supabaseStatus,
+      youtube: {
+        configured: !!process.env.YOUTUBE_API_KEY,
+        hasApiKey: !!process.env.YOUTUBE_API_KEY,
+        hasClientId: !!process.env.YOUTUBE_CLIENT_ID,
+        hasClientSecret: !!process.env.YOUTUBE_CLIENT_SECRET
+      },
+      openai: {
+        configured: !!process.env.OPENAI_API_KEY,
+        hasApiKey: !!process.env.OPENAI_API_KEY
+      }
+    }
   });
 });
 
