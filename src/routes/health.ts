@@ -16,9 +16,10 @@ router.get('/health', async (req: Request, res: Response): Promise<void> => {
       version: process.env.npm_package_version || '1.0.0',
       services: {
         database: { 
-          status: 'unknown', 
+          status: 'unknown' as string, 
           configured: supabaseStatus.configured,
-          details: supabaseStatus
+          details: supabaseStatus,
+          error: undefined as string | undefined
         },
         youtube: { 
           status: 'unknown', 
@@ -37,17 +38,11 @@ router.get('/health', async (req: Request, res: Response): Promise<void> => {
         const dbResult = await testDatabaseConnection();
         healthCheck.services.database.status = dbResult.connected ? 'healthy' : 'unhealthy';
         if (dbResult.error) {
-          healthCheck.services.database = { 
-            ...healthCheck.services.database, 
-            error: dbResult.error 
-          };
+          healthCheck.services.database.error = dbResult.error;
         }
       } catch (error) {
         healthCheck.services.database.status = 'error';
-        healthCheck.services.database = {
-          ...healthCheck.services.database,
-          error: error instanceof Error ? error.message : 'Database check failed'
-        };
+        healthCheck.services.database.error = error instanceof Error ? error.message : 'Database check failed';
       }
     } else {
       healthCheck.services.database.status = 'not_configured';
