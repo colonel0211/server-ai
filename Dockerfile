@@ -1,4 +1,4 @@
-# Simple single-stage build that should work on Koyeb
+# Working Dockerfile with correct build order
 FROM node:18-alpine
 
 # Install system dependencies
@@ -18,20 +18,17 @@ RUN apk add --no-cache \
 # Set working directory
 WORKDIR /app
 
-# Copy package files
+# Copy package files and TypeScript config
 COPY package*.json ./
 COPY tsconfig.json ./
 
-# Install dependencies (all dependencies including dev for build)
-RUN npm install
-
-# Copy source code
+# Copy source code (needed before npm install due to build scripts)
 COPY src/ ./src/
 
-# Build TypeScript
-RUN npx tsc
+# Install dependencies and build in one step
+RUN npm install && npm run build:prod
 
-# Remove dev dependencies after build
+# Remove dev dependencies to reduce image size
 RUN npm prune --omit=dev
 
 # Create directories
