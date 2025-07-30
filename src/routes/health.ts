@@ -1,5 +1,6 @@
+// src/routes/health.ts - Minimal health check routes
 import { Router, Request, Response } from 'express';
-import { supabase } from '../config/supabase';
+import { SupabaseService } from '../config/supabase';
 
 const router = Router();
 
@@ -20,14 +21,10 @@ interface HealthStatus {
     total: number;
     percentage: number;
   };
-  disk: {
-    temp: string;
-    uploads: string;
-  };
 }
 
 // Health check endpoint
-router.get('/health', async (req: Request, res: Response) => {
+router.get('/health', async (req: Request, res: Response): Promise<void> => {
   try {
     const healthStatus: HealthStatus = {
       status: 'healthy',
@@ -45,17 +42,13 @@ router.get('/health', async (req: Request, res: Response) => {
         used: 0,
         total: 0,
         percentage: 0
-      },
-      disk: {
-        temp: 'unknown',
-        uploads: 'unknown'
       }
     };
 
     // Check database connection
     try {
-      const { error } = await supabase.from('users').select('count').limit(1);
-      healthStatus.services.database = error ? 'disconnected' : 'connected';
+      const isConnected = await SupabaseService.testConnection();
+      healthStatus.services.database = isConnected ? 'connected' : 'disconnected';
     } catch (error) {
       healthStatus.services.database = 'disconnected';
     }
@@ -69,10 +62,10 @@ router.get('/health', async (req: Request, res: Response) => {
     // Check FFmpeg availability
     try {
       const { exec } = require('child_process');
-      await new Promise((resolve, reject) => {
+      await new Promise<void>((resolve, reject) => {
         exec('ffmpeg -version', (error: any) => {
           if (error) reject(error);
-          else resolve(true);
+          else resolve();
         });
       });
       healthStatus.services.ffmpeg = 'available';
@@ -87,28 +80,6 @@ router.get('/health', async (req: Request, res: Response) => {
       total: Math.round(memUsage.heapTotal / 1024 / 1024), // MB
       percentage: Math.round((memUsage.heapUsed / memUsage.heapTotal) * 100)
     };
-
-    // Disk space check
-    try {
-      const fs = require('fs-extra');
-      const path = require('path');
-      
-      const tempDir = path.join(process.cwd(), 'temp');
-      const uploadsDir = path.join(process.cwd(), 'uploads');
-      
-      await fs.ensureDir(tempDir);
-      await fs.ensureDir(uploadsDir);
-      
-      healthStatus.disk = {
-        temp: 'accessible',
-        uploads: 'accessible'
-      };
-    } catch (error) {
-      healthStatus.disk = {
-        temp: 'error',
-        uploads: 'error'
-      };
-    }
 
     // Determine overall health
     const isHealthy = 
@@ -134,24 +105,25 @@ router.get('/health', async (req: Request, res: Response) => {
   }
 });
 
-// Readiness probe (for Kubernetes-style deployments)
-router.get('/ready', async (req: Request, res: Response) => {
+// Readiness probe
+router.get('/ready', async (req: Request, res: Response): Promise<void> => {
   try {
-    // Check if all critical services are ready
-    const { error } = await supabase.from('users').select('count').limit(1);
+    const isDbReady = await SupabaseService.testConnection();
     
-    if (error) {
-      return res.status(503).json({
+    if (!isDbReady) {
+      res.status(503).json({
         ready: false,
         message: 'Database not ready'
       });
+      return;
     }
 
     if (!process.env.YOUTUBE_API_KEY) {
-      return res.status(503).json({
+      res.status(503).json({
         ready: false,
         message: 'YouTube API not configured'
       });
+      return;
     }
 
     res.json({
@@ -167,36 +139,13 @@ router.get('/ready', async (req: Request, res: Response) => {
   }
 });
 
-// Liveness probe (for Kubernetes-style deployments)
-router.get('/live', (req: Request, res: Response) => {
+// Liveness probe
+router.get('/live', (req: Request, res: Response): void => {
   res.json({
     alive: true,
     timestamp: new Date().toISOString(),
     uptime: process.uptime()
   });
-});
-
-// System info endpoint
-router.get('/info', (req: Request, res: Response) => {
-  const info = {
-    name: 'YouTube Automation API',
-    version: process.env.npm_package_version || '1.0.0',
-    environment: process.env.NODE_ENV || 'development',
-    node_version: process.version,
-    platform: process.platform,
-    architecture: process.arch,
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString(),
-    features: {
-      video_generation: true,
-      youtube_upload: !!process.env.YOUTUBE_API_KEY,
-      ai_content: !!process.env.OPENAI_API_KEY,
-      scheduled_uploads: true,
-      analytics: true
-    }
-  };
-
-  res.json(info);
 });
 
 export default router;
