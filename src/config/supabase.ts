@@ -1,58 +1,103 @@
-// src/config/supabase.ts - Minimal Supabase configuration
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-const supabaseUrl = process.env.SUPABASE_URL || '';
-const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || '';
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+// Environment variables
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_ANON_KEY;
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-// Public client (for frontend interactions)
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+// Check if we have valid configuration
+const hasValidUrl = supabaseUrl && supabaseUrl.includes('.supabase.co');
+const hasValidKey = supabaseKey && supabaseKey.length > 20;
 
-// Admin client (for server-side operations)
-export const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey, {
-  auth: {
-    autoRefreshToken: false,
-    persistSession: false
+// Lazy initialization - only create clients when actually needed
+let _supabase: SupabaseClient | null = null;
+let _supabaseAdmin: SupabaseClient | null = null;
+
+export const getSupabaseClient = (): SupabaseClient | null => {
+  if (!hasValidUrl || !hasValidKey) {
+    console.warn('Supabase client not available - missing or invalid environment variables');
+    return null;
   }
-});
-
-// Simple database service for basic operations
-export class SupabaseService {
-  static async testConnection(): Promise<boolean> {
+  
+  if (!_supabase) {
     try {
-      if (!supabaseUrl || !supabaseAnonKey) {
-        return false;
-      }
-      
-      const { error } = await supabase.from('users').select('count').limit(1);
-      return !error;
+      _supabase = createClient(supabaseUrl!, supabaseKey!);
     } catch (error) {
-      console.error('Supabase connection test failed:', error);
-      return false;
+      console.error('Failed to create Supabase client:', error);
+      return null;
     }
   }
+  
+  return _supabase;
+};
 
-  static async createUser(userData: any): Promise<any> {
-    const { data, error } = await supabaseAdmin
-      .from('users')
-      .insert(userData)
-      .select()
-      .single();
-    
-    if (error) throw error;
-    return data;
+export const getSupabaseAdmin = (): SupabaseClient | null => {
+  if (!hasValidUrl || !supabaseServiceKey) {
+    console.warn('Supabase admin client not available - missing environment variables');
+    return null;
+  }
+  
+  if (!_supabaseAdmin) {
+    try {
+      _supabaseAdmin = createClient(supabaseUrl!, supabaseServiceKey!);
+    } catch (error) {
+      console.error('Failed to create Supabase admin client:', error);
+      return null;
+    }
+  }
+  
+  return _supabaseAdmin;
+};
+
+// Legacy exports for backward compatibility (but these are safe now)
+export const supabase = null; // Don't export direct client
+export const supabaseAdmin = null; // Don't export direct admin client
+
+// Test database connection
+export async function testDatabaseConnection(): Promise<{ connected: boolean; error?: string }> {
+  const client = getSupabaseClient();
+  
+  if (!client) {
+    return { 
+      connected: false, 
+      error: 'Supabase client not configured - missing or invalid environment variables' 
+    };
   }
 
-  static async getUserById(id: string): Promise<any> {
-    const { data, error } = await supabaseAdmin
-      .from('users')
-      .select('*')
-      .eq('id', id)
-      .single();
+  try {
+    // Try a simple query that doesn't require specific tables
+    const { data, error } = await client
+      .from('videos') // This table might not exist, which is fine
+      .select('count')
+      .limit(1);
     
-    if (error) return null;
-    return data;
+    // If table doesn't exist (PGRST116), connection is still good
+    if (error && error.code !== 'PGRST116') {
+      return { connected: false, error: error.message };
+    }
+    
+    return { connected: true };
+  } catch (error) {
+    return { 
+      connected: false, 
+      error: error instanceof Error ? error.message : 'Unknown database error' 
+    };
   }
 }
 
-export default supabase;
+// Check if Supabase is properly configured
+export function isSupabaseConfigured(): boolean {
+  return hasValidUrl && hasValidKey;
+}
+
+// Get configuration status
+export function getSupabaseStatus() {
+  return {
+    configured: isSupabaseConfigured(),
+    hasUrl: !!supabaseUrl,
+    hasKey: !!supabaseKey,
+    hasServiceKey: !!supabaseServiceKey,
+    urlValid: hasValidUrl,
+    keyValid: hasValidKey
+  };
+}
