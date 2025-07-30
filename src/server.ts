@@ -1,13 +1,13 @@
+// src/server.ts - Complete server with real YouTube upload
 import express from 'express';
 import { google } from 'googleapis';
-import fs from 'fs';
+import fs from 'fs-extra';
 import path from 'path';
 import cors from 'cors';
 import cron from 'node-cron';
-import axios from 'axios';
-
-// Load environment variables
+import { VideoGenerator } from './videoGenerator';
 import dotenv from 'dotenv';
+
 dotenv.config();
 
 const app = express();
@@ -26,18 +26,22 @@ const oauth2Client = new google.auth.OAuth2(
   process.env.YOUTUBE_REDIRECT_URI
 );
 
-// System state (using memory since Koyeb is stateless)
+// Video generator
+const videoGenerator = new VideoGenerator();
+
+// System state
 let systemRunning = false;
 let stats = {
   totalUploaded: 0,
   todayUploaded: 0,
-  lastUpload: null,
+  lastUpload: null as Date | null,
   errors: 0,
   systemStarted: new Date(),
-  nextUpload: null
+  nextUpload: null as Date | null,
+  lastError: null as string | null
 };
 
-// Content generation templates
+// Content templates for automation
 const contentTemplates = {
   topics: [
     "10 Amazing Facts About",
@@ -49,67 +53,48 @@ const contentTemplates = {
     "Shocking Truth About",
     "Life-Changing Tips for",
     "The Science of",
-    "Mysteries of"
+    "Mysteries of",
+    "Future of",
+    "History of",
+    "Complete Guide to"
   ],
   subjects: [
     "Space Exploration", "Ocean Mysteries", "Ancient Civilizations",
     "Technology Trends", "Human Psychology", "Nature Wonders", 
     "Scientific Discoveries", "Historical Events", "Future Predictions",
     "Art and Culture", "Health and Wellness", "Success Stories",
-    "Artificial Intelligence", "Climate Change", "Renewable Energy"
+    "Artificial Intelligence", "Climate Change", "Renewable Energy",
+    "Quantum Physics", "Blockchain Technology", "Sustainable Living",
+    "Digital Marketing", "Personal Development", "Financial Freedom"
   ]
 };
 
-// Health check endpoint for Koyeb
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'healthy', 
-    uptime: process.uptime(),
-    systemRunning,
-    lastUpload: stats.lastUpload 
-  });
-});
-
-// Load tokens function
-function loadTokens() {
+// Token management
+async function loadTokens(): Promise<boolean> {
   try {
-    // In Koyeb, we'll use environment variables for persistence
-    const tokensEnv = process.env.YOUTUBE_TOKENS;
-    if (tokensEnv) {
-      const tokens = JSON.parse(tokensEnv);
+    const tokenPath = '.youtube-tokens.json';
+    if (await fs.pathExists(tokenPath)) {
+      const tokens = await fs.readJson(tokenPath);
       oauth2Client.setCredentials(tokens);
-      console.log('✅ YouTube tokens loaded from environment');
-      return true;
-    }
-    
-    // Fallback to file system (temporary)
-    if (fs.existsSync('.youtube-tokens.json')) {
-      const tokens = JSON.parse(fs.readFileSync('.youtube-tokens.json', 'utf8'));
-      oauth2Client.setCredentials(tokens);
-      console.log('✅ YouTube tokens loaded from file');
+      console.log('✅ YouTube tokens loaded');
       return true;
     }
   } catch (error) {
-    console.log('❌ Failed to load tokens:', error.message);
+    console.log('❌ Failed to load tokens:', error);
   }
   return false;
 }
 
-// Save tokens function
-function saveTokens(tokens: any) {
+async function saveTokens(tokens: any) {
   try {
-    // Save to file for current session
-    fs.writeFileSync('.youtube-tokens.json', JSON.stringify(tokens));
-    console.log('💾 Tokens saved to file');
-    
-    // In production, you'd save to environment variable or database
-    // For now, tokens persist only during the session
+    await fs.writeJson('.youtube-tokens.json', tokens);
+    console.log('💾 Tokens saved');
   } catch (error) {
     console.error('Failed to save tokens:', error);
   }
 }
 
-// Generate video content
+// Content generation
 async function generateVideoContent() {
   const topic = contentTemplates.topics[Math.floor(Math.random() * contentTemplates.topics.length)];
   const subject = contentTemplates.subjects[Math.floor(Math.random() * contentTemplates.subjects.length)];
@@ -120,56 +105,37 @@ Discover fascinating insights about ${subject.toLowerCase()}. This educational v
 
 🔔 Subscribe for more educational content!
 👍 Like if you found this helpful!
-💬 Comment with your thoughts!
+💬 Comment with your thoughts below!
 
-#${subject.replace(/\s+/g, '')} #Education #Facts #Learning #Knowledge #Science
+Key topics covered:
+• Essential information about ${subject.toLowerCase()}
+• Important facts and discoveries
+• Practical insights and applications
+• Future implications and trends
+
+#${subject.replace(/\s+/g, '')} #Education #Facts #Learning #Knowledge #Science #Educational #Documentary #Information
+
+Generated: ${new Date().toISOString()}
   `.trim();
 
   const tags = [
     ...subject.toLowerCase().split(' '),
-    'education', 'facts', 'knowledge', 'learning', 'science', 'educational'
-  ];
+    'education', 'facts', 'knowledge', 'learning', 'science', 
+    'educational', 'documentary', 'information', 'discovery'
+  ].slice(0, 10); // YouTube allows max 10 tags
 
   return { title, description, tags };
 }
 
-// Simulate video creation (replace with actual video generation)
-async function createVideo(content: any): Promise<string> {
-  try {
-    console.log(`🎬 Creating video: ${content.title}`);
-    
-    // Create temp directory if not exists
-    if (!fs.existsSync('temp_videos')) {
-      fs.mkdirSync('temp_videos', { recursive: true });
-    }
-    
-    const videoPath = `temp_videos/video_${Date.now()}.mp4`;
-    
-    // Simulate video creation process
-    await new Promise(resolve => setTimeout(resolve, 3000));
-    
-    // Create a minimal MP4 file (in real implementation, use FFmpeg to create actual video)
-    const dummyVideoBuffer = Buffer.from('dummy video content for ' + content.title);
-    fs.writeFileSync(videoPath, dummyVideoBuffer);
-    
-    console.log(`✅ Video created: ${videoPath}`);
-    return videoPath;
-    
-  } catch (error) {
-    console.error('Video creation failed:', error);
-    throw error;
-  }
-}
-
-// Upload to YouTube
+// YouTube upload function
 async function uploadToYoutube(videoPath: string, content: any) {
   try {
     console.log(`📤 Uploading to YouTube: ${content.title}`);
     
-    // For demo purposes, we'll simulate the upload
-    // In production, uncomment the actual YouTube API call below
-    
-    /*
+    if (!await fs.pathExists(videoPath)) {
+      throw new Error('Video file not found');
+    }
+
     const response = await youtube.videos.insert({
       auth: oauth2Client,
       part: ['snippet', 'status'],
@@ -178,27 +144,23 @@ async function uploadToYoutube(videoPath: string, content: any) {
           title: content.title,
           description: content.description,
           tags: content.tags,
-          categoryId: '27', // Education
+          categoryId: '27', // Education category
+          defaultLanguage: 'en',
+          defaultAudioLanguage: 'en'
         },
         status: {
           privacyStatus: process.env.VIDEO_PRIVACY || 'public',
-          selfDeclaredMadeForKids: false
+          selfDeclaredMadeForKids: false,
+          publicStatsViewable: true
         },
       },
       media: {
         body: fs.createReadStream(videoPath),
       },
     });
-    */
-    
-    // Simulate successful upload
-    const mockVideoId = 'ABC' + Math.random().toString(36).substr(2, 9);
-    const response = { data: { id: mockVideoId } };
-    
+
     // Clean up video file
-    if (fs.existsSync(videoPath)) {
-      fs.unlinkSync(videoPath);
-    }
+    await videoGenerator.cleanup(videoPath);
 
     const videoId = response.data.id;
     const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
@@ -207,6 +169,7 @@ async function uploadToYoutube(videoPath: string, content: any) {
     stats.totalUploaded++;
     stats.todayUploaded++;
     stats.lastUpload = new Date();
+    stats.lastError = null;
     
     console.log(`✅ Video uploaded successfully: ${videoUrl}`);
     
@@ -220,6 +183,7 @@ async function uploadToYoutube(videoPath: string, content: any) {
   } catch (error) {
     console.error('Upload failed:', error);
     stats.errors++;
+    stats.lastError = error.message;
     throw error;
   }
 }
@@ -234,30 +198,51 @@ async function automatedVideoUpload() {
   try {
     console.log('🤖 Starting automated video creation...');
     
+    // Check authentication
+    if (!oauth2Client.credentials.access_token) {
+      throw new Error('YouTube authentication required');
+    }
+    
     // Generate content
     const content = await generateVideoContent();
     console.log(`📝 Generated content: ${content.title}`);
     
     // Create video
-    const videoPath = await createVideo(content);
+    const videoPath = await videoGenerator.createVideo(content);
     
     // Upload to YouTube
     const result = await uploadToYoutube(videoPath, content);
     
     console.log('🎉 Automated upload completed:', result.title);
     
-    // Calculate next upload time
-    stats.nextUpload = new Date(Date.now() + 2 * 60 * 60 * 1000); // 2 hours from now
+    // Calculate next upload time (2 hours)
+    stats.nextUpload = new Date(Date.now() + 2 * 60 * 60 * 1000);
+    
+    return result;
     
   } catch (error) {
     console.error('❌ Automated upload failed:', error);
     stats.errors++;
+    stats.lastError = error.message;
+    throw error;
   }
 }
 
+// Health check for Koyeb
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy', 
+    uptime: process.uptime(),
+    systemRunning,
+    lastUpload: stats.lastUpload,
+    memory: process.memoryUsage(),
+    version: '1.0.0'
+  });
+});
+
 // Main dashboard
-app.get('/', (req, res) => {
-  const tokensExist = fs.existsSync('.youtube-tokens.json') || process.env.YOUTUBE_TOKENS;
+app.get('/', async (req, res) => {
+  const tokensExist = await fs.pathExists('.youtube-tokens.json');
   
   res.send(`
     <!DOCTYPE html>
@@ -349,10 +334,16 @@ app.get('/', (req, res) => {
                 50% { opacity: 0.5; }
                 100% { opacity: 1; }
             }
-            @media (max-width: 768px) {
-                .header h1 { font-size: 1.8em; }
-                .stats { grid-template-columns: 1fr; }
-                button { width: 100%; margin: 5px 0; }
+            .error-log {
+                background: rgba(239, 68, 68, 0.1);
+                border: 1px solid #ef4444;
+                border-radius: 8px;
+                padding: 10px;
+                margin: 10px 0;
+                font-family: monospace;
+                font-size: 0.9em;
+                max-height: 200px;
+                overflow-y: auto;
             }
         </style>
     </head>
@@ -361,7 +352,7 @@ app.get('/', (req, res) => {
             <div class="header">
                 <h1>🤖 YouTube Automation System</h1>
                 <p>Running 24/7 on Koyeb Cloud Platform</p>
-                <small>Deployed at: ${new Date().toLocaleString()}</small>
+                <small>System Started: ${stats.systemStarted.toLocaleString()}</small>
             </div>
 
             ${!tokensExist ? `
@@ -370,9 +361,15 @@ app.get('/', (req, res) => {
                 </div>
             ` : `
                 <div class="status success">
-                    ✅ Connected to YouTube API - System Ready for Automation
+                    ✅ Connected to YouTube API - Ready for Automation
                 </div>
             `}
+
+            ${stats.lastError ? `
+                <div class="status error">
+                    🚨 Last Error: ${stats.lastError}
+                </div>
+            ` : ''}
 
             <div class="stats">
                 <div class="stat-card">
@@ -404,24 +401,29 @@ app.get('/', (req, res) => {
                 <button onclick="uploadNow()" ${!tokensExist ? 'disabled' : ''}>
                     📤 Upload Video Now
                 </button>
+                <button onclick="clearErrors()">
+                    🧹 Clear Error Log
+                </button>
                 <button onclick="location.reload()">
                     🔄 Refresh Dashboard
                 </button>
             </div>
 
             <div class="controls">
-                <h3>📅 Automation Schedule</h3>
-                <p><strong>Upload Frequency:</strong> Every 2 hours automatically</p>
+                <h3>📅 Schedule & Status</h3>
+                <p><strong>Upload Frequency:</strong> Every 2 hours (12 videos/day)</p>
+                <p><strong>Expected Monthly:</strong> ~360 videos</p>
                 <p><strong>Last Upload:</strong> ${stats.lastUpload ? stats.lastUpload.toLocaleString() : 'None yet'}</p>
-                <p><strong>Next Upload:</strong> ${stats.nextUpload ? stats.nextUpload.toLocaleTimeString() : 'When system starts'}</p>
+                <p><strong>Next Upload:</strong> ${stats.nextUpload ? stats.nextUpload.toLocaleString() : 'When system starts'}</p>
                 <p><strong>System Uptime:</strong> ${Math.floor(process.uptime() / 3600)}h ${Math.floor((process.uptime() % 3600) / 60)}m</p>
             </div>
 
             <div class="controls">
-                <h3>🌐 Koyeb Deployment Info</h3>
+                <h3>🌐 Deployment Info</h3>
                 <p><strong>Platform:</strong> Koyeb Cloud</p>
                 <p><strong>Environment:</strong> ${process.env.NODE_ENV || 'development'}</p>
                 <p><strong>Memory Usage:</strong> ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)} MB</p>
+                <p><strong>Node Version:</strong> ${process.version}</p>
                 <p><strong>App URL:</strong> <a href="${process.env.YOUTUBE_REDIRECT_URI?.replace('/auth/callback', '')}" style="color: #ff6b6b;">${process.env.YOUTUBE_REDIRECT_URI?.replace('/auth/callback', '') || 'localhost:3000'}</a></p>
             </div>
         </div>
@@ -445,6 +447,7 @@ app.get('/', (req, res) => {
                     makeRequest('/api/upload-now'); 
                 }
             }
+            function clearErrors() { makeRequest('/api/clear-errors'); }
         </script>
     </body>
     </html>
@@ -452,15 +455,20 @@ app.get('/', (req, res) => {
 });
 
 // API Routes
-app.post('/api/start', (req, res) => {
-  if (!fs.existsSync('.youtube-tokens.json') && !process.env.YOUTUBE_TOKENS) {
-    return res.json({ success: false, message: '❌ Please authenticate with YouTube first' });
+app.post('/api/start', async (req, res) => {
+  try {
+    const tokensExist = await fs.pathExists('.youtube-tokens.json');
+    if (!tokensExist) {
+      return res.json({ success: false, message: '❌ Please authenticate with YouTube first' });
+    }
+    
+    systemRunning = true;
+    stats.nextUpload = new Date(Date.now() + 2 * 60 * 60 * 1000);
+    console.log('🚀 Automation system started');
+    res.json({ success: true, message: '🚀 24/7 Automation started! Videos will upload every 2 hours.' });
+  } catch (error) {
+    res.json({ success: false, message: `❌ Failed to start: ${error.message}` });
   }
-  
-  systemRunning = true;
-  stats.nextUpload = new Date(Date.now() + 2 * 60 * 60 * 1000);
-  console.log('🚀 Automation system started');
-  res.json({ success: true, message: '🚀 24/7 Automation started! Videos will upload every 2 hours.' });
 });
 
 app.post('/api/stop', (req, res) => {
@@ -472,11 +480,20 @@ app.post('/api/stop', (req, res) => {
 
 app.post('/api/upload-now', async (req, res) => {
   try {
-    await automatedVideoUpload();
-    res.json({ success: true, message: '✅ Video uploaded successfully! Check your YouTube channel.' });
+    const result = await automatedVideoUpload();
+    res.json({ 
+      success: true, 
+      message: `✅ Video "${result.title}" uploaded! View: ${result.videoUrl}` 
+    });
   } catch (error) {
     res.json({ success: false, message: `❌ Upload failed: ${error.message}` });
   }
+});
+
+app.post('/api/clear-errors', (req, res) => {
+  stats.errors = 0;
+  stats.lastError = null;
+  res.json({ success: true, message: '🧹 Error log cleared' });
 });
 
 // OAuth routes
@@ -493,7 +510,7 @@ app.get('/auth/callback', async (req, res) => {
   try {
     const { tokens } = await oauth2Client.getToken(req.query.code as string);
     oauth2Client.setCredentials(tokens);
-    saveTokens(tokens);
+    await saveTokens(tokens);
     console.log('✅ YouTube authentication successful');
     res.redirect('/?success=auth');
   } catch (error) {
@@ -502,34 +519,160 @@ app.get('/auth/callback', async (req, res) => {
   }
 });
 
-// Schedule uploads every 2 hours
+// Cron schedules
 cron.schedule('0 */2 * * *', () => {
   console.log('⏰ Scheduled upload triggered');
-  automatedVideoUpload();
-});
-
-// Reset daily stats at midnight
-cron.schedule('0 0 * * *', () => {
-  stats.todayUploaded = 0;
-  console.log('📊 Daily stats reset');
-});
-
-// Initialize
-loadTokens();
-
-// Create temp directories
-['temp_videos'].forEach(dir => {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+  if (systemRunning) {
+    automatedVideoUpload().catch(console.error);
   }
 });
 
-// Start server
-app.listen(PORT, '0.0.0.0', () => {
-  console.log('🤖 YouTube Automation System Started');
-  console.log(`🌐 Running on Koyeb: http://0.0.0.0:${PORT}`);
-  console.log('📅 Scheduled uploads every 2 hours');
-  console.log('🔄 System ready for 24/7 operation');
+cron.schedule('0 0 * * *', () => {
+  stats.todayUploaded = 0;
+  console.log('📅 Daily stats reset - New day started');
 });
 
-export default app;
+// Error recovery cron - retry failed uploads
+cron.schedule('*/30 * * * *', async () => {
+  if (systemRunning && stats.lastError && stats.errors > 0) {
+    console.log('🔄 Attempting error recovery...');
+    try {
+      await automatedVideoUpload();
+      console.log('✅ Error recovery successful');
+    } catch (error) {
+      console.log('❌ Error recovery failed, will retry in 30 minutes');
+    }
+  }
+});
+
+// Server startup
+async function startServer() {
+  try {
+    // Load existing tokens
+    await loadTokens();
+    
+    // Ensure temp directories exist
+    await videoGenerator.ensureDirectories();
+    
+    // Start the server
+    app.listen(PORT, () => {
+      console.log(`
+╔════════════════════════════════════════════════════════════╗
+║                 🤖 YouTube Automation Bot                  ║
+║                      SYSTEM STARTED                       ║
+╠════════════════════════════════════════════════════════════╣
+║  🌐 Server: http://localhost:${PORT}                      ║
+║  🎬 Status: Ready for 24/7 automation                     ║
+║  ⚡ Platform: Koyeb Cloud Infrastructure                   ║
+║  📅 Upload Schedule: Every 2 hours                        ║
+║  🎯 Expected: 360+ videos/month                           ║
+╚════════════════════════════════════════════════════════════╝
+      `);
+      
+      // Auto-start if tokens exist and system was previously running
+      if (process.env.AUTO_START === 'true') {
+        setTimeout(async () => {
+          const tokensExist = await fs.pathExists('.youtube-tokens.json');
+          if (tokensExist) {
+            systemRunning = true;
+            stats.nextUpload = new Date(Date.now() + 2 * 60 * 60 * 1000);
+            console.log('🚀 Auto-started automation system');
+          }
+        }, 5000);
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Server startup failed:', error);
+    process.exit(1);
+  }
+}
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('🛑 Received SIGTERM, shutting down gracefully...');
+  systemRunning = false;
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  console.log('🛑 Received SIGINT, shutting down gracefully...');
+  systemRunning = false;
+  process.exit(0);
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+  console.error('💥 Uncaught Exception:', error);
+  stats.errors++;
+  stats.lastError = error.message;
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
+  stats.errors++;
+  stats.lastError = String(reason);
+});
+
+// Additional API endpoints for better monitoring
+app.get('/api/stats', (req, res) => {
+  res.json({
+    ...stats,
+    systemRunning,
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    nodeVersion: process.version,
+    platform: process.platform,
+    environment: process.env.NODE_ENV
+  });
+});
+
+app.get('/api/logs', (req, res) => {
+  // Simple in-memory log viewer (in production, use proper logging)
+  const logs = [
+    `System started: ${stats.systemStarted.toISOString()}`,
+    `Total uploads: ${stats.totalUploaded}`,
+    `Today uploads: ${stats.todayUploaded}`,
+    `Errors: ${stats.errors}`,
+    `Status: ${systemRunning ? 'RUNNING' : 'STOPPED'}`,
+    `Last upload: ${stats.lastUpload?.toISOString() || 'None'}`,
+    `Next upload: ${stats.nextUpload?.toISOString() || 'Not scheduled'}`,
+    `Last error: ${stats.lastError || 'None'}`
+  ];
+  
+  res.json({ logs });
+});
+
+// Webhook endpoint for external triggers
+app.post('/api/webhook', async (req, res) => {
+  const { action, secret } = req.body;
+  
+  // Simple security check
+  if (secret !== process.env.WEBHOOK_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  try {
+    switch (action) {
+      case 'upload':
+        const result = await automatedVideoUpload();
+        res.json({ success: true, result });
+        break;
+      case 'start':
+        systemRunning = true;
+        res.json({ success: true, message: 'System started' });
+        break;
+      case 'stop':
+        systemRunning = false;
+        res.json({ success: true, message: 'System stopped' });
+        break;
+      default:
+        res.status(400).json({ error: 'Invalid action' });
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Start the server
+startServer();
