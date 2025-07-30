@@ -3,31 +3,50 @@ import { testDatabaseConnection, isSupabaseConfigured, getSupabaseStatus } from 
 
 const router = Router();
 
+interface ServiceStatus {
+  status: string;
+  configured: boolean;
+  error?: string;
+  details?: any;
+}
+
+interface HealthCheckResponse {
+  status: string;
+  timestamp: string;
+  uptime: number;
+  environment: string;
+  version: string;
+  services: {
+    database: ServiceStatus;
+    youtube: ServiceStatus;
+    openai: ServiceStatus;
+  };
+}
+
 // Basic health check
 router.get('/health', async (req: Request, res: Response): Promise<void> => {
   try {
     const supabaseStatus = getSupabaseStatus();
     
-    const healthCheck = {
+    const healthCheck: HealthCheckResponse = {
       status: 'healthy',
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       environment: process.env.NODE_ENV || 'development',
       version: process.env.npm_package_version || '1.0.0',
       services: {
-        database: { 
-          status: 'unknown' as string, 
+        database: {
+          status: 'unknown',
           configured: supabaseStatus.configured,
-          details: supabaseStatus,
-          error: undefined as string | undefined
+          details: supabaseStatus
         },
-        youtube: { 
-          status: 'unknown', 
-          configured: !!process.env.YOUTUBE_API_KEY 
+        youtube: {
+          status: 'unknown',
+          configured: !!process.env.YOUTUBE_API_KEY
         },
-        openai: { 
-          status: 'unknown', 
-          configured: !!process.env.OPENAI_API_KEY 
+        openai: {
+          status: 'unknown',
+          configured: !!process.env.OPENAI_API_KEY
         }
       }
     };
