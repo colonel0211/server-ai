@@ -1,11 +1,10 @@
-// src/server.ts - Basic server to get you started
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
 import rateLimit from 'express-rate-limit';
 import { config } from 'dotenv';
-import path from 'path';
+import healthRoutes from './routes/health';
 
 // Load environment variables
 config();
@@ -33,16 +32,8 @@ app.use(compression());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    version: '1.0.0',
-    environment: process.env.NODE_ENV || 'development'
-  });
-});
+// Health check routes
+app.use('/', healthRoutes);
 
 // Basic API status endpoint
 app.get('/api/status', (req, res) => {
