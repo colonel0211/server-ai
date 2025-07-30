@@ -6,12 +6,12 @@
   "scripts": {
     "start": "node dist/server.js",
     "dev": "nodemon src/server.ts",
-    "build": "tsc",
+    "build": "rm -rf dist && tsc",
+    "build:prod": "tsc",
     "watch": "tsc -w",
     "test": "jest",
     "lint": "eslint src/**/*.ts",
-    "clean": "rimraf dist",
-    "prebuild": "npm run clean",
+    "clean": "rm -rf dist",
     "docker:build": "docker build -t youtube-automation .",
     "docker:run": "docker run -p 3000:3000 --env-file .env youtube-automation"
   },
