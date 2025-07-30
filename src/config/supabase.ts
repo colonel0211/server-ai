@@ -6,8 +6,8 @@ const supabaseKey = process.env.SUPABASE_ANON_KEY;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 // Check if we have valid configuration
-const hasValidUrl = supabaseUrl && supabaseUrl.includes('.supabase.co');
-const hasValidKey = supabaseKey && supabaseKey.length > 20;
+const hasValidUrl: boolean = !!(supabaseUrl && supabaseUrl.includes('.supabase.co'));
+const hasValidKey: boolean = !!(supabaseKey && supabaseKey.length > 20);
 
 // Lazy initialization - only create clients when actually needed
 let _supabase: SupabaseClient | null = null;
@@ -90,14 +90,21 @@ export function isSupabaseConfigured(): boolean {
   return hasValidUrl && hasValidKey;
 }
 
-// Get configuration status
-export function getSupabaseStatus() {
+// Get configuration status - with explicit boolean types
+export function getSupabaseStatus(): {
+  configured: boolean;
+  hasUrl: boolean;
+  hasKey: boolean;
+  hasServiceKey: boolean;
+  urlValid: boolean;
+  keyValid: boolean;
+} {
   return {
     configured: isSupabaseConfigured(),
-    hasUrl: !!supabaseUrl,
-    hasKey: !!supabaseKey,
-    hasServiceKey: !!supabaseServiceKey,
-    urlValid: !!hasValidUrl,
-    keyValid: !!hasValidKey
+    hasUrl: Boolean(supabaseUrl),
+    hasKey: Boolean(supabaseKey),
+    hasServiceKey: Boolean(supabaseServiceKey),
+    urlValid: hasValidUrl,
+    keyValid: hasValidKey
   };
 }
