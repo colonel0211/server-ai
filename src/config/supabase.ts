@@ -97,7 +97,7 @@ export function getSupabaseStatus() {
     hasUrl: !!supabaseUrl,
     hasKey: !!supabaseKey,
     hasServiceKey: !!supabaseServiceKey,
-    urlValid: hasValidUrl,
-    keyValid: hasValidKey
+    urlValid: !!hasValidUrl,
+    keyValid: !!hasValidKey
   };
 }
