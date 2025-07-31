@@ -1,22 +1,18 @@
 {
   "compilerOptions": {
-    "target": "ES2020",
-    "module": "commonjs",
-    "lib": ["ES2020"],
-    "outDir": "./dist",
+    "target": "ES2020", // Or a later version
+    "module": "CommonJS", // Or "ESNext" if you're using ES modules everywhere
     "rootDir": "./src",
-    "strict": false,
+    "outDir": "./dist",
     "esModuleInterop": true,
+    "strict": true,
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": false,
-    "resolveJsonModule": true,
-    "moduleResolution": "node",
-    "noImplicitAny": false,
-    "noUnusedLocals": false,
-    "noUnusedParameters": false,
-    "noImplicitReturns": false,
-    "allowUnreachableCode": true,
-    "allowUnusedLabels": true
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true, // If you load JSON files
+    "baseUrl": "./", // Needed for module resolution
+    "paths": {
+      "@/*": ["src/*"] // Example alias, adjust if needed
+    }
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
