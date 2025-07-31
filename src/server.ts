@@ -1,4 +1,3 @@
-// src/server.ts - Complete YouTube Automation System
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -13,12 +12,12 @@ import fs from 'fs-extra';
 import automationRoutes from './routes/automation'; // Assuming this route handler uses the scheduler
 
 // Import your core services
+// At the top of src/server.ts
 import { YouTubeContentEngine } from './services/ContentEngine';
-// import { VideoProducer } from './services/videoProducer'; // VideoProducer might be instantiated by AutomationScheduler
-import { AutomationScheduler } from './services/automationScheduler'; // Import the AutomationScheduler
-
-// Import the Supabase client to check its initialization status
-import supabase, { SupabaseClient } from './config/database'; 
+import { VideoProducer, VideoConfig } from './services/videoProducer'; // Import VideoProducer and VideoConfig
+import { AutomationScheduler } from './services/automationScheduler'; // Make sure this is imported
+import supabase from './config/database'; // Ensure Supabase is imported
+import { logger } from './utils/logger'; // Ensure logger is imported 
 
 // Load environment variables from .env file
 dotenv.config();
