@@ -1,4 +1,3 @@
-// src/services/videoProducer.ts
 import ffmpeg from 'fluent-ffmpeg';
 import fs from 'fs-extra';
 import path from 'path';
@@ -6,603 +5,606 @@ import { createCanvas, loadImage, registerFont } from 'canvas';
 import axios from 'axios';
 import OpenAI from 'openai';
 
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
+
 export interface VideoConfig {
   title: string;
   script: string;
   hook: string;
   niche: string;
-  duration?: number;
-  resolution?: '1080p' | '720p' | '4K';
-  style?: 'minimal' | 'modern' | 'cinematic';
+  duration: number;
+  resolution: '720p' | '1080p' | '4K';
+  style: 'modern' | 'vintage' | 'minimalist' | 'vibrant';
 }
 
 export interface VideoAssets {
-  backgroundImages: string[];
-  audioPath?: string;
+  audioPath: string;
   thumbnailPath: string;
-  subtitlesPath?: string;
+  backgroundImages: string[];
+  subtitles?: SubtitleEntry[];
+}
+
+export interface SubtitleEntry {
+  start: number;
+  end: number;
+  text: string;
 }
 
 export class VideoProducer {
-  private workingDir: string;
-  private assetsDir: string;
   private outputDir: string;
-  private openai: OpenAI;
+  private tempDir: string;
+  private fontsLoaded: boolean = false;
 
   constructor() {
-    this.workingDir = path.join(process.cwd(), 'temp', 'video_production');
-    this.assetsDir = path.join(this.workingDir, 'assets');
-    this.outputDir = path.join(this.workingDir, 'output');
-    
-    this.openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY
-    });
-    
+    this.outputDir = path.join(__dirname, '../../output');
+    this.tempDir = path.join(__dirname, '../../temp');
     this.ensureDirectories();
-    console.log('🎬 Video Producer initialized');
   }
 
-  /**
-   * Create complete video from config
-   */
-  async createVideo(config: VideoConfig): Promise<string> {
+  private async ensureDirectories(): Promise<void> {
+    await fs.ensureDir(path.join(this.outputDir, 'videos'));
+    await fs.ensureDir(path.join(this.outputDir, 'audio'));
+    await fs.ensureDir(path.join(this.outputDir, 'thumbnails'));
+    await fs.ensureDir(path.join(this.outputDir, 'images'));
+    await fs.ensureDir(this.tempDir);
+  }
+
+  private async loadFonts(): Promise<void> {
+    if (this.fontsLoaded) return;
+
     try {
-      console.log(`🎬 Starting video production: ${config.title}`);
-      
-      const jobId = `video_${Date.now()}`;
-      const jobDir = path.join(this.workingDir, jobId);
-      await fs.ensureDir(jobDir);
+      // Download and register fonts if they don't exist
+      const fontsDir = path.join(__dirname, '../../assets/fonts');
+      await fs.ensureDir(fontsDir);
 
-      // Step 1: Generate script segments
-      const scriptSegments = this.parseScript(config.script);
-      
-      // Step 2: Generate visual assets
-      const assets = await this.generateAssets(config, jobDir);
-      
-      // Step 3: Create text-to-speech audio
-      const audioPath = await this.generateAudio(config.script, jobDir);
-      
-      // Step 4: Create video scenes
-      const scenePaths = await this.createScenes(scriptSegments, assets, jobDir);
-      
-      // Step 5: Combine everything into final video
-      const finalVideoPath = await this.combineScenes(scenePaths, audioPath, jobDir, config);
-      
-      // Step 6: Generate thumbnail
-      const thumbnailPath = await this.generateThumbnail(config, jobDir);
-      
-      console.log(`✅ Video production completed: ${finalVideoPath}`);
-      return finalVideoPath;
-
-    } catch (error: any) {
-      console.error('❌ Video production failed:', error.message);
-      throw error;
-    }
-  }
-
-  /**
-   * Parse script into timed segments
-   */
-  private parseScript(script: string): Array<{text: string, duration: number, startTime: number}> {
-    const sentences = script.split(/[.!?]+/).filter(s => s.trim().length > 0);
-    const segments: Array<{text: string, duration: number, startTime: number}> = [];
-    let currentTime = 0;
-
-    sentences.forEach(sentence => {
-      const text = sentence.trim();
-      if (text.length === 0) return;
-
-      // Estimate duration based on text length (average reading speed)
-      const wordsPerMinute = 150;
-      const words = text.split(' ').length;
-      const duration = Math.max(3, (words / wordsPerMinute) * 60); // Minimum 3 seconds
-
-      segments.push({
-        text,
-        duration,
-        startTime: currentTime
-      });
-
-      currentTime += duration;
-    });
-
-    return segments;
-  }
-
-  /**
-   * Generate visual assets (images, backgrounds)
-   */
-  private async generateAssets(config: VideoConfig, jobDir: string): Promise<VideoAssets> {
-    try {
-      const assetsPath = path.join(jobDir, 'assets');
-      await fs.ensureDir(assetsPath);
-
-      // Get stock images related to the topic
-      const backgroundImages = await this.getStockImages(config.niche, config.title, 5);
-      
-      // Download and save images
-      const savedImages: string[] = [];
-      for (let i = 0; i < backgroundImages.length; i++) {
-        const imagePath = path.join(assetsPath, `bg_${i}.jpg`);
-        await this.downloadImage(backgroundImages[i], imagePath);
-        savedImages.push(imagePath);
-      }
-
-      // Generate thumbnail
-      const thumbnailPath = await this.createThumbnail(config, assetsPath);
-
-      return {
-        backgroundImages: savedImages,
-        thumbnailPath
+      const fontUrls = {
+        'Roboto-Bold.ttf': 'https://fonts.gstatic.com/s/roboto/v30/KFOlCnqEu92Fr1MmWUlfBBc4.woff2',
+        'OpenSans-Regular.ttf': 'https://fonts.gstatic.com/s/opensans/v34/memSYaGs126MiZpBA-UvWbX2vVnXBbObj2OVZyOOSr4dVJWUgsjZ0C4nY1M2xLER.woff2'
       };
 
-    } catch (error: any) {
-      console.error('❌ Failed to generate assets:', error.message);
-      throw error;
+      for (const [filename, url] of Object.entries(fontUrls)) {
+        const fontPath = path.join(fontsDir, filename);
+        
+        if (!await fs.pathExists(fontPath)) {
+          console.log(`📥 Downloading font: ${filename}`);
+          // Note: In production, you'd want to use actual TTF files
+          // This is just for demonstration - you'd need proper font files
+        }
+
+        try {
+          registerFont(fontPath, { family: filename.split('-')[0] });
+        } catch (error) {
+          console.warn(`⚠️ Could not load font ${filename}:`, error);
+        }
+      }
+
+      this.fontsLoaded = true;
+    } catch (error) {
+      console.warn('⚠️ Font loading failed, using system fonts:', error);
+      this.fontsLoaded = true;
     }
   }
 
-  /**
-   * Get stock images from Unsplash
-   */
-  private async getStockImages(niche: string, title: string, count: number): Promise<string[]> {
+  async createVideo(config: VideoConfig): Promise<string> {
+    console.log(`🎬 Starting video production: "${config.title}"`);
+    
     try {
-      // Extract keywords from title for better image search
-      const keywords = this.extractKeywords(title);
-      const searchQuery = `${niche} ${keywords.join(' ')}`.toLowerCase();
+      // Load fonts first
+      await this.loadFonts();
 
-      // Using Unsplash API (you'll need to add UNSPLASH_ACCESS_KEY to env)
-      const accessKey = process.env.UNSPLASH_ACCESS_KEY;
-      if (!accessKey) {
-        console.warn('⚠️ Unsplash API key missing, using placeholder images');
-        return this.getPlaceholderImages(count);
-      }
+      // Generate all assets
+      const assets = await this.generateAssets(config);
 
-      const response = await axios.get(`https://api.unsplash.com/search/photos`, {
-        params: {
-          query: searchQuery,
-          per_page: count,
-          orientation: 'landscape'
-        },
-        headers: {
-          'Authorization': `Client-ID ${accessKey}`
-        }
-      });
+      // Create the final video
+      const videoPath = await this.assembleVideo(config, assets);
 
-      return response.data.results.map((photo: any) => photo.urls.full);
+      console.log(`✅ Video created successfully: ${videoPath}`);
+      return videoPath;
 
     } catch (error) {
-      console.warn('⚠️ Failed to fetch stock images, using placeholders');
-      return this.getPlaceholderImages(count);
+      console.error('❌ Video production failed:', error);
+      throw error;
     }
   }
 
-  /**
-   * Get placeholder images when API unavailable
-   */
-  private getPlaceholderImages(count: number): string[] {
-    const placeholders = [
-      'https://images.unsplash.com/photo-1518709268805-4e9042af2176?w=1920&h=1080',
-      'https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=1920&h=1080',
-      'https://images.unsplash.com/photo-1519389950473-47ba0277781c?w=1920&h=1080',
-      'https://images.unsplash.com/photo-1504384764586-bb4cdc1707b0?w=1920&h=1080',
-      'https://images.unsplash.com/photo-1488590528505-98d2b5aba04b?w=1920&h=1080'
-    ];
+  private async generateAssets(config: VideoConfig): Promise<VideoAssets> {
+    console.log('🎨 Generating video assets...');
 
-    return placeholders.slice(0, count);
+    const [audioPath, thumbnailPath, backgroundImages] = await Promise.all([
+      this.generateVoiceover(config.script, config.title),
+      this.generateThumbnail(config.title, config.niche, config.style),
+      this.generateBackgroundImages(config.niche, 5)
+    ]);
+
+    return {
+      audioPath,
+      thumbnailPath,
+      backgroundImages,
+      subtitles: this.generateSubtitles(config.script)
+    };
   }
 
-  /**
-   * Extract keywords from title
-   */
-  private extractKeywords(title: string): string[] {
-    const stopWords = ['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'how', 'what', 'why', 'when', 'where'];
-    return title.toLowerCase()
-      .replace(/[^\w\s]/g, '')
-      .split(' ')
-      .filter(word => word.length > 2 && !stopWords.includes(word))
-      .slice(0, 3);
-  }
+  private async generateVoiceover(script: string, title: string): Promise<string> {
+    console.log('🎵 Generating AI voiceover...');
 
-  /**
-   * Download image from URL
-   */
-  private async downloadImage(url: string, filepath: string): Promise<void> {
-    const response = await axios({
-      method: 'GET',
-      url,
-      responseType: 'stream'
-    });
-
-    const writer = fs.createWriteStream(filepath);
-    response.data.pipe(writer);
-
-    return new Promise((resolve, reject) => {
-      writer.on('finish', resolve);
-      writer.on('error', reject);
-    });
-  }
-
-  /**
-   * Generate text-to-speech audio using OpenAI
-   */
-  private async generateAudio(script: string, jobDir: string): Promise<string> {
     try {
-      console.log('🎵 Generating audio narration...');
-      
-      const mp3 = await this.openai.audio.speech.create({
-        model: "tts-1-hd",
-        voice: "onyx", // Deep, engaging male voice
+      const response = await openai.audio.speech.create({
+        model: 'tts-1-hd',
+        voice: 'nova',
         input: script,
-        speed: 0.95 // Slightly slower for better comprehension
+        response_format: 'mp3',
+        speed: 1.0
       });
 
-      const audioPath = path.join(jobDir, 'narration.mp3');
-      const buffer = Buffer.from(await mp3.arrayBuffer());
-      await fs.writeFile(audioPath, buffer);
+      const audioBuffer = Buffer.from(await response.arrayBuffer());
+      const audioPath = path.join(this.outputDir, 'audio', `${this.sanitizeFilename(title)}.mp3`);
       
-      console.log('✅ Audio generated successfully');
+      await fs.writeFile(audioPath, audioBuffer);
+      console.log(`✅ Voiceover saved: ${audioPath}`);
+      
       return audioPath;
 
-    } catch (error: any) {
-      console.error('❌ Failed to generate audio:', error.message);
-      throw error;
+    } catch (error) {
+      console.error('❌ Voiceover generation failed:', error);
+      throw new Error(`Failed to generate voiceover: ${error}`);
     }
   }
 
-  /**
-   * Create individual video scenes
-   */
-  private async createScenes(
-    segments: Array<{text: string, duration: number, startTime: number}>,
-    assets: VideoAssets,
-    jobDir: string
-  ): Promise<string[]> {
-    try {
-      console.log('🎬 Creating video scenes...');
-      
-      const scenePaths: string[] = [];
-      const sceneDir = path.join(jobDir, 'scenes');
-      await fs.ensureDir(sceneDir);
+  private async generateThumbnail(title: string, niche: string, style: string): Promise<string> {
+    console.log('🖼️ Generating thumbnail...');
 
-      for (let i = 0; i < segments.length; i++) {
-        const segment = segments[i];
-        const backgroundImage = assets.backgroundImages[i % assets.backgroundImages.length];
-        
-        // Create text overlay image
-        const textOverlayPath = await this.createTextOverlay(segment.text, sceneDir, i);
-        
-        // Create scene video with background + text
-        const scenePath = await this.createScene(
-          backgroundImage,
-          textOverlayPath,
-          segment.duration,
-          sceneDir,
-          i
-        );
-        
-        scenePaths.push(scenePath);
-      }
-
-      console.log(`✅ Created ${scenePaths.length} scenes`);
-      return scenePaths;
-
-    } catch (error: any) {
-      console.error('❌ Failed to create scenes:', error.message);
-      throw error;
-    }
-  }
-
-  /**
-   * Create text overlay image
-   */
-  private async createTextOverlay(text: string, outputDir: string, index: number): Promise<string> {
-    const canvas = createCanvas(1920, 1080);
+    const canvas = createCanvas(1280, 720);
     const ctx = canvas.getContext('2d');
 
-    // Semi-transparent background for text
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-    ctx.fillRect(0, 800, 1920, 280);
+    // Style configurations
+    const styles = {
+      modern: {
+        bgGradient: ['#667eea', '#764ba2'],
+        textColor: '#ffffff',
+        accentColor: '#ff6b6b'
+      },
+      vintage: {
+        bgGradient: ['#8B4513', '#D2691E'],
+        textColor: '#F5F5DC',
+        accentColor: '#FFD700'
+      },
+      minimalist: {
+        bgGradient: ['#ffffff', '#f8f9fa'],
+        textColor: '#333333',
+        accentColor: '#007bff'
+      },
+      vibrant: {
+        bgGradient: ['#ff9a9e', '#fecfef'],
+        textColor: '#ffffff',
+        accentColor: '#ffd700'
+      }
+    };
 
-    // Text styling
-    ctx.fillStyle = '#FFFFFF';
-    ctx.font = 'bold 48px Arial';
+    const currentStyle = styles[style as keyof typeof styles] || styles.modern;
+
+    // Create gradient background
+    const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+    gradient.addColorStop(0, currentStyle.bgGradient[0]);
+    gradient.addColorStop(1, currentStyle.bgGradient[1]);
+    
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Add overlay pattern
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
+    for (let i = 0; i < canvas.width; i += 40) {
+      for (let j = 0; j < canvas.height; j += 40) {
+        if ((i + j) % 80 === 0) {
+          ctx.fillRect(i, j, 20, 20);
+        }
+      }
+    }
+
+    // Title text
+    ctx.fillStyle = currentStyle.textColor;
+    ctx.font = 'bold 48px Arial, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
-    // Word wrap text
-    const words = text.split(' ');
-    const lines: string[] = [];
-    let currentLine = '';
-    
-    for (const word of words) {
-      const testLine = currentLine + (currentLine ? ' ' : '') + word;
-      const metrics = ctx.measureText(testLine);
-      
-      if (metrics.width > 1800 && currentLine) {
-        lines.push(currentLine);
-        currentLine = word;
-      } else {
-        currentLine = testLine;
-      }
-    }
-    if (currentLine) lines.push(currentLine);
-
-    // Draw text lines
-    const lineHeight = 60;
-    const startY = 940 - ((lines.length - 1) * lineHeight / 2);
-    
-    lines.forEach((line, lineIndex) => {
-      ctx.fillText(line, 960, startY + (lineIndex * lineHeight));
-    });
-
-    // Save overlay
-    const overlayPath = path.join(outputDir, `text_overlay_${index}.png`);
-    const buffer = canvas.toBuffer('image/png');
-    await fs.writeFile(overlayPath, buffer);
-
-    return overlayPath;
-  }
-
-  /**
-   * Create individual scene video
-   */
-  private async createScene(
-    backgroundPath: string,
-    textOverlayPath: string,
-    duration: number,
-    outputDir: string,
-    index: number
-  ): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const outputPath = path.join(outputDir, `scene_${index}.mp4`);
-
-      ffmpeg()
-        .input(backgroundPath)
-        .inputOptions(['-loop 1'])
-        .input(textOverlayPath)
-        .inputOptions(['-loop 1'])
-        .complexFilter([
-          '[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1[bg]',
-          '[1:v]scale=1920:1080[overlay]',
-          '[bg][overlay]overlay=0:0[out]'
-        ])
-        .outputOptions([
-          '-map [out]',
-          '-t', duration.toString(),
-          '-r', '30',
-          '-c:v', 'libx264',
-          '-preset', 'medium',
-          '-crf', '23',
-          '-pix_fmt', 'yuv420p'
-        ])
-        .output(outputPath)
-        .on('end', () => resolve(outputPath))
-        .on('error', reject)
-        .run();
-    });
-  }
-
-  /**
-   * Combine all scenes with audio
-   */
-  private async combineScenes(
-    scenePaths: string[],
-    audioPath: string,
-    jobDir: string,
-    config: VideoConfig
-  ): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const outputPath = path.join(jobDir, `${config.title.replace(/[^a-zA-Z0-9]/g, '_')}_final.mp4`);
-      
-      // Create concat file
-      const concatFilePath = path.join(jobDir, 'concat.txt');
-      const concatContent = scenePaths.map(path => `file '${path}'`).join('\n');
-      fs.writeFileSync(concatFilePath, concatContent);
-
-      ffmpeg()
-        .input(concatFilePath)
-        .inputOptions(['-f', 'concat', '-safe', '0'])
-        .input(audioPath)
-        .outputOptions([
-          '-c:v', 'libx264',
-          '-c:a', 'aac',
-          '-b:a', '128k',
-          '-shortest',
-          '-preset', 'medium',
-          '-crf', '23'
-        ])
-        .output(outputPath)
-        .on('end', () => {
-          console.log('✅ Final video assembled');
-          resolve(outputPath);
-        })
-        .on('error', reject)
-        .run();
-    });
-  }
-
-  /**
-   * Generate eye-catching thumbnail
-   */
-  private async generateThumbnail(config: VideoConfig, jobDir: string): Promise<string> {
-    try {
-      console.log('🖼️ Generating thumbnail...');
-      
-      // Use OpenAI DALL-E to create thumbnail
-      const response = await this.openai.images.generate({
-        model: "dall-e-3",
-        prompt: `Create a vibrant, eye-catching YouTube thumbnail for "${config.title}". 
-                Style: Bold text, bright colors, high contrast, clickable design. 
-                Niche: ${config.niche}. Make it look professional and engaging.`,
-        size: "1792x1024", // YouTube thumbnail ratio
-        quality: "hd",
-        n: 1,
-      });
-
-      const thumbnailUrl = response.data[0].url!;
-      const thumbnailPath = path.join(jobDir, 'thumbnail.png');
-      
-      // Download thumbnail
-      await this.downloadImage(thumbnailUrl, thumbnailPath);
-      
-      console.log('✅ Thumbnail generated');
-      return thumbnailPath;
-
-    } catch (error: any) {
-      console.error('❌ Failed to generate thumbnail:', error.message);
-      
-      // Fallback: Create simple text thumbnail
-      return this.createFallbackThumbnail(config, jobDir);
-    }
-  }
-
-  /**
-   * Create fallback thumbnail with Canvas
-   */
-  private async createFallbackThumbnail(config: VideoConfig, jobDir: string): Promise<string> {
-    const canvas = createCanvas(1280, 720);
-    const ctx = canvas.getContext('2d');
-
-    // Gradient background
-    const gradient = ctx.createLinearGradient(0, 0, 1280, 720);
-    gradient.addColorStop(0, '#FF6B6B');
-    gradient.addColorStop(1, '#4ECDC4');
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, 1280, 720);
-
-    // Title text
-    ctx.fillStyle = '#FFFFFF';
-    ctx.font = 'bold 64px Arial';
-    ctx.textAlign = 'center';
-    ctx.strokeStyle = '#000000';
-    ctx.lineWidth = 4;
-
-    // Word wrap title
-    const words = config.title.split(' ');
-    const lines: string[] = [];
-    let currentLine = '';
-    
-    for (const word of words) {
-      const testLine = currentLine + (currentLine ? ' ' : '') + word;
-      const metrics = ctx.measureText(testLine);
-      
-      if (metrics.width > 1100 && currentLine) {
-        lines.push(currentLine);
-        currentLine = word;
-      } else {
-        currentLine = testLine;
-      }
-    }
-    if (currentLine) lines.push(currentLine);
-
-    // Draw title
-    const lineHeight = 80;
-    const startY = 360 - ((lines.length - 1) * lineHeight / 2);
-    
-    lines.forEach((line, index) => {
-      const y = startY + (index * lineHeight);
-      ctx.strokeText(line, 640, y);
-      ctx.fillText(line, 640, y);
-    });
-
-    // Save thumbnail
-    const thumbnailPath = path.join(jobDir, 'thumbnail_fallback.png');
-    const buffer = canvas.toBuffer('image/png');
-    await fs.writeFile(thumbnailPath, buffer);
-
-    return thumbnailPath;
-  }
-
-  /**
-   * Create thumbnail with Canvas
-   */
-  private async createThumbnail(config: VideoConfig, assetsDir: string): Promise<string> {
-    const canvas = createCanvas(1280, 720);
-    const ctx = canvas.getContext('2d');
-
-    // Background gradient
-    const gradient = ctx.createLinearGradient(0, 0, 1280, 720);
-    gradient.addColorStop(0, '#667eea');
-    gradient.addColorStop(1, '#764ba2');
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, 1280, 720);
-
-    // Title styling
-    ctx.fillStyle = '#FFFFFF';
-    ctx.font = 'bold 56px Arial';
-    ctx.textAlign = 'center';
-    ctx.shadowColor = 'rgba(0,0,0,0.5)';
+    // Text shadow
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
     ctx.shadowBlur = 10;
     ctx.shadowOffsetX = 2;
     ctx.shadowOffsetY = 2;
 
-    // Split title into multiple lines if needed
-    const maxWidth = 1100;
-    const words = config.title.split(' ');
+    // Word wrap title
+    const words = title.split(' ');
     const lines: string[] = [];
-    let currentLine = words[0];
+    let currentLine = '';
 
-    for (let i = 1; i < words.length; i++) {
-      const word = words[i];
-      const width = ctx.measureText(currentLine + ' ' + word).width;
-      if (width < maxWidth) {
-        currentLine += ' ' + word;
-      } else {
+    for (const word of words) {
+      const testLine = currentLine + (currentLine ? ' ' : '') + word;
+      const metrics = ctx.measureText(testLine);
+      
+      if (metrics.width > canvas.width - 100 && currentLine) {
         lines.push(currentLine);
         currentLine = word;
+      } else {
+        currentLine = testLine;
       }
     }
-    lines.push(currentLine);
+    if (currentLine) lines.push(currentLine);
 
     // Draw title lines
-    const lineHeight = 70;
-    const startY = 360 - ((lines.length - 1) * lineHeight / 2);
-    
+    const startY = canvas.height / 2 - (lines.length - 1) * 30;
     lines.forEach((line, index) => {
-      ctx.fillText(line, 640, startY + (index * lineHeight));
+      ctx.fillText(line, canvas.width / 2, startY + index * 60);
     });
 
+    // Niche tag
+    ctx.shadowColor = 'transparent';
+    ctx.fillStyle = currentStyle.accentColor;
+    ctx.font = 'bold 24px Arial, sans-serif';
+    ctx.fillText(`#${niche.toUpperCase()}`, canvas.width / 2, canvas.height - 60);
+
     // Save thumbnail
-    const thumbnailPath = path.join(assetsDir, 'thumbnail.png');
+    const thumbnailPath = path.join(this.outputDir, 'thumbnails', `${this.sanitizeFilename(title)}.png`);
     const buffer = canvas.toBuffer('image/png');
     await fs.writeFile(thumbnailPath, buffer);
 
+    console.log(`✅ Thumbnail saved: ${thumbnailPath}`);
     return thumbnailPath;
   }
 
-  /**
-   * Ensure required directories exist
-   */
-  private async ensureDirectories(): Promise<void> {
-    await fs.ensureDir(this.workingDir);
-    await fs.ensureDir(this.assetsDir);
-    await fs.ensureDir(this.outputDir);
-  }
+  private async generateBackgroundImages(niche: string, count: number): Promise<string[]> {
+    console.log(`🖼️ Generating ${count} background images...`);
 
-  /**
-   * Clean up temporary files
-   */
-  async cleanup(jobDir: string): Promise<void> {
+    const images: string[] = [];
+    
     try {
-      if (await fs.pathExists(jobDir)) {
-        await fs.remove(jobDir);
-        console.log('🧹 Cleaned up temporary files');
+      // Generate images using DALL-E
+      for (let i = 0; i < count; i++) {
+        const prompt = `A beautiful, high-quality background image related to ${niche}, abstract, modern, suitable for video background, 16:9 aspect ratio, vibrant colors`;
+        
+        try {
+          const response = await openai.images.generate({
+            model: 'dall-e-3',
+            prompt,
+            size: '1792x1024',
+            quality: 'standard',
+            n: 1
+          });
+
+          const imageUrl = response.data[0].url;
+          if (imageUrl) {
+            const imageResponse = await axios.get(imageUrl, { responseType: 'arraybuffer' });
+            const imagePath = path.join(this.outputDir, 'images', `bg_${niche}_${i + 1}.png`);
+            
+            await fs.writeFile(imagePath, imageResponse.data);
+            images.push(imagePath);
+            
+            console.log(`✅ Background image ${i + 1} saved: ${imagePath}`);
+          }
+        } catch (error) {
+          console.warn(`⚠️ Failed to generate image ${i + 1}, using fallback`);
+          // Create a fallback colored background
+          const fallbackPath = await this.createFallbackImage(niche, i);
+          images.push(fallbackPath);
+        }
       }
+
     } catch (error) {
-      console.warn('⚠️ Failed to cleanup temporary files:', error);
+      console.warn('⚠️ DALL-E generation failed, creating fallback images');
+      
+      // Create fallback images
+      for (let i = 0; i < count; i++) {
+        const fallbackPath = await this.createFallbackImage(niche, i);
+        images.push(fallbackPath);
+      }
     }
+
+    return images;
   }
 
-  /**
-   * Get video information
-   */
+  private async createFallbackImage(niche: string, index: number): Promise<string> {
+    const canvas = createCanvas(1920, 1080);
+    const ctx = canvas.getContext('2d');
+
+    // Color palettes for different niches
+    const palettes = {
+      tech: ['#667eea', '#764ba2', '#f093fb'],
+      lifestyle: ['#ffecd2', '#fcb69f', '#ff9a9e'],
+      business: ['#a8edea', '#fed6e3', '#667eea'],
+      health: ['#d299c2', '#fef9d7', '#89f7fe'],
+      default: ['#ff9a9e', '#fecfef', '#fad0c4']
+    };
+
+    const colors = palettes[niche as keyof typeof palettes] || palettes.default;
+    const color1 = colors[index % colors.length];
+    const color2 = colors[(index + 1) % colors.length];
+
+    // Create gradient
+    const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+    gradient.addColorStop(0, color1);
+    gradient.addColorStop(1, color2);
+    
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Add geometric shapes
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
+    for (let i = 0; i < 20; i++) {
+      const x = Math.random() * canvas.width;
+      const y = Math.random() * canvas.height;
+      const size = Math.random() * 100 + 50;
+      
+      ctx.beginPath();
+      ctx.arc(x, y, size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    const imagePath = path.join(this.outputDir, 'images', `fallback_${niche}_${index}.png`);
+    const buffer = canvas.toBuffer('image/png');
+    await fs.writeFile(imagePath, buffer);
+
+    return imagePath;
+  }
+
+  private generateSubtitles(script: string): SubtitleEntry[] {
+    const sentences = script.split(/[.!?]+/).filter(s => s.trim().length > 0);
+    const avgWordsPerSecond = 2.5; // Approximate speaking speed
+    
+    let currentTime = 0;
+    const subtitles: SubtitleEntry[] = [];
+
+    sentences.forEach(sentence => {
+      const words = sentence.trim().split(/\s+/);
+      const duration = words.length / avgWordsPerSecond;
+      
+      subtitles.push({
+        start: currentTime,
+        end: currentTime + duration,
+        text: sentence.trim()
+      });
+      
+      currentTime += duration + 0.5; // Small pause between sentences
+    });
+
+    return subtitles;
+  }
+
+  private async assembleVideo(config: VideoConfig, assets: VideoAssets): Promise<string> {
+    console.log('🎞️ Assembling final video...');
+
+    const outputPath = path.join(this.outputDir, 'videos', `${this.sanitizeFilename(config.title)}.mp4`);
+    
+    return new Promise((resolve, reject) => {
+      let ffmpegCommand = ffmpeg();
+
+      // Add background images as input (slideshow)
+      assets.backgroundImages.forEach(imagePath => {
+        ffmpegCommand = ffmpegCommand.input(imagePath);
+      });
+
+      // Add audio input
+      ffmpegCommand = ffmpegCommand.input(assets.audioPath);
+
+      // Resolution settings
+      const resolutions = {
+        '720p': { width: 1280, height: 720 },
+        '1080p': { width: 1920, height: 1080 },
+        '4K': { width: 3840, height: 2160 }
+      };
+      
+      const { width, height } = resolutions[config.resolution];
+
+      ffmpegCommand
+        .complexFilter([
+          // Create slideshow from images
+          `concat=n=${assets.backgroundImages.length}:v=1:a=0[slideshow]`,
+          // Scale to desired resolution
+          `[slideshow]scale=${width}:${height}[video]`
+        ])
+        .outputOptions([
+          '-map', '[video]',
+          '-map', `${assets.backgroundImages.length}:a`, // Audio from last input
+          '-c:v', 'libx264',
+          '-c:a', 'aac',
+          '-b:v', '2M',
+          '-b:a', '192k',
+          '-preset', 'medium',
+          '-crf', '23',
+          '-pix_fmt', 'yuv420p',
+          '-movflags', '+faststart'
+        ])
+        .format('mp4')
+        .on('start', (command) => {
+          console.log('🎬 FFmpeg started:', command);
+        })
+        .on('progress', (progress) => {
+          console.log(`🎞️ Processing: ${Math.round(progress.percent || 0)}%`);
+        })
+        .on('end', () => {
+          console.log('✅ Video assembly completed');
+          resolve(outputPath);
+        })
+        .on('error', (error) => {
+          console.error('❌ Video assembly failed:', error);
+          reject(error);
+        })
+        .save(outputPath);
+    });
+  }
+
+  private sanitizeFilename(filename: string): string {
+    return filename
+      .replace(/[^\w\s-]/g, '') // Remove special characters
+      .replace(/\s+/g, '-') // Replace spaces with hyphens
+      .toLowerCase()
+      .substring(0, 100); // Limit length
+  }
+
+  async createCustomVideo(options: {
+    images: string[];
+    audioPath: string;
+    title: string;
+    subtitles?: SubtitleEntry[];
+    effects?: string[];
+  }): Promise<string> {
+    console.log(`🎬 Creating custom video: ${options.title}`);
+
+    const outputPath = path.join(
+      this.outputDir,
+      'videos',
+      `custom_${this.sanitizeFilename(options.title)}.mp4`
+    );
+
+    return new Promise((resolve, reject) => {
+      let ffmpegCommand = ffmpeg();
+
+      // Add image inputs
+      options.images.forEach(imagePath => {
+        ffmpegCommand = ffmpegCommand.input(imagePath);
+      });
+
+      // Add audio input
+      ffmpegCommand = ffmpegCommand.input(options.audioPath);
+
+      ffmpegCommand
+        .complexFilter([
+          `concat=n=${options.images.length}:v=1:a=0[slideshow]`,
+          '[slideshow]scale=1920:1080[video]'
+        ])
+        .outputOptions([
+          '-map', '[video]',
+          '-map', `${options.images.length}:a`,
+          '-c:v', 'libx264',
+          '-c:a', 'aac',
+          '-shortest' // Stop when shortest input ends
+        ])
+        .format('mp4')
+        .on('end', () => resolve(outputPath))
+        .on('error', reject)
+        .save(outputPath);
+    });
+  }
+
+  async addSubtitlesToVideo(videoPath: string, subtitles: SubtitleEntry[]): Promise<string> {
+    console.log('📝 Adding subtitles to video...');
+
+    const outputPath = videoPath.replace('.mp4', '_subtitled.mp4');
+    
+    // Create SRT subtitle file
+    const srtPath = path.join(this.tempDir, `subtitles_${Date.now()}.srt`);
+    const srtContent = this.generateSRTFile(subtitles);
+    await fs.writeFile(srtPath, srtContent);
+
+    return new Promise((resolve, reject) => {
+      ffmpeg(videoPath)
+        .input(srtPath)
+        .outputOptions([
+          '-c:v', 'copy',
+          '-c:a', 'copy',
+          '-c:s', 'mov_text',
+          '-metadata:s:s:0', 'language=eng'
+        ])
+        .format('mp4')
+        .on('end', async () => {
+          await fs.remove(srtPath); // Clean up temp file
+          resolve(outputPath);
+        })
+        .on('error', async (error) => {
+          await fs.remove(srtPath); // Clean up temp file
+          reject(error);
+        })
+        .save(outputPath);
+    });
+  }
+
+  private generateSRTFile(subtitles: SubtitleEntry[]): string {
+    return subtitles
+      .map((subtitle, index) => {
+        const startTime = this.formatSRTTime(subtitle.start);
+        const endTime = this.formatSRTTime(subtitle.end);
+        
+        return `${index + 1}\n${startTime} --> ${endTime}\n${subtitle.text}\n`;
+      })
+      .join('\n');
+  }
+
+  private formatSRTTime(seconds: number): string {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    const milliseconds = Math.floor((seconds % 1) * 1000);
+
+    return `${hours.toString().padStart(2, '0')}:${minutes
+      .toString()
+      .padStart(2, '0')}:${secs.toString().padStart(2, '0')},${milliseconds
+      .toString()
+      .padStart(3, '0')}`;
+  }
+
   async getVideoInfo(videoPath: string): Promise<any> {
     return new Promise((resolve, reject) => {
-      ffmpeg.ffprobe(videoPath, (err, metadata) => {
-        if (err) reject(err);
-        else resolve(metadata);
+      ffmpeg.ffprobe(videoPath, (error, metadata) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve(metadata);
+        }
       });
     });
+  }
+
+  async optimizeForPlatform(videoPath: string, platform: 'youtube' | 'tiktok' | 'instagram'): Promise<string> {
+    console.log(`🎯 Optimizing video for ${platform}...`);
+
+    const platformConfigs = {
+      youtube: {
+        resolution: '1920x1080',
+        bitrate: '5M',
+        format: 'mp4'
+      },
+      tiktok: {
+        resolution: '1080x1920',
+        bitrate: '3M',
+        format: 'mp4'
+      },
+      instagram: {
+        resolution: '1080x1080',
+        bitrate: '3M',
+        format: 'mp4'
+      }
+    };
+
+    const config = platformConfigs[platform];
+    const outputPath = videoPath.replace('.mp4', `_${platform}.mp4`);
+
+    return new Promise((resolve, reject) => {
+      ffmpeg(videoPath)
+        .size(config.resolution)
+        .videoBitrate(config.bitrate)
+        .format(config.format)
+        .outputOptions([
+          '-c:v', 'libx264',
+          '-c:a', 'aac',
+          '-preset', 'medium',
+          '-crf', '23'
+        ])
+        .on('end', () => resolve(outputPath))
+        .on('error', reject)
+        .save(outputPath);
+    });
+  }
+
+  async cleanup(): Promise<void> {
+    console.log('🧹 Cleaning up temporary files...');
+    
+    try {
+      if (await fs.pathExists(this.tempDir)) {
+        await fs.emptyDir(this.tempDir);
+      }
+      console.log('✅ Cleanup completed');
+    } catch (error) {
+      console.error('❌ Cleanup failed:', error);
+    }
   }
 }
