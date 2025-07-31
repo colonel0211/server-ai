@@ -1,38 +1,34 @@
-import cron from 'node-cron';
-// Import your ContentEngine and VideoProducer classes
-import { YouTubeContentEngine, TrendingVideo, VideoScript } from './ContentEngine'; // Assuming these interfaces/classes are exported from ContentEngine
-import { VideoProducer, VideoProductionResult } from './videoProducer'; // Assuming VideoProducer and a result interface are here
-import supabase from '../config/database';
-import { logger } from '../utils/logger';
+// src/services/automationScheduler.ts
 
-// Make sure these interfaces are consistent with your ContentEngine and VideoProducer
+import cron from 'node-cron';
+
+// --- IMPORT NECESSARY TYPES AND UTILITIES ---
+// Adjust paths as per your project structure
+import { YouTubeContentEngine, TrendingVideo, VideoScript, VideoProductionResult } from './ContentEngine'; // Ensure VideoProductionResult is exported from ContentEngine
+import { VideoProducer, VideoConfig } from './videoProducer'; // Import VideoConfig and VideoProductionResult
+import supabase, { SupabaseClient } from '../config/database'; // Ensure Supabase client is imported
+import { logger } from '../utils/logger'; // Ensure logger is imported
+
+// --- SCHEDULER STATUS INTERFACE ---
 interface ScheduleStatus {
   isRunning: boolean;
   lastRun: Date | null;
   nextRun: Date | null;
-  totalVideosProd: number;
-  errors: string[];
-}
-
-// This interface is for the result of a video *production* step, not necessarily content generation
-// It should align with what VideoProducer.createVideo returns.
-// If VideoProducer returns a different structure, you'll need to adjust this.
-interface VideoProcessingResult {
-  success: boolean;
-  videoId?: string; // ID for the produced video
-  filePath?: string; // Path to the generated video file
-  error?: string;
+  totalVideosProd: number; // Count of successfully produced videos
+  errors: string[];       // List of recent errors
 }
 
 export class AutomationScheduler {
   private contentEngine: YouTubeContentEngine;
   private videoProducer: VideoProducer;
+  private scheduler: AutomationScheduler; // Reference to self for methods
   private status: ScheduleStatus;
-  private tasks: cron.ScheduledTask[] = [];
+  private tasks: cron.ScheduledTask[] = []; // Holds all scheduled cron jobs
 
   constructor() {
     this.contentEngine = new YouTubeContentEngine();
     this.videoProducer = new VideoProducer();
+    this.scheduler = this; // Self-reference
     this.status = {
       isRunning: false,
       lastRun: null,
@@ -42,7 +38,7 @@ export class AutomationScheduler {
     };
   }
 
-  // Initialize all scheduled tasks
+  // Initialize schedules but do not start them
   public initialize(): void {
     try {
       this.setupDailyVideoGeneration();
@@ -57,68 +53,49 @@ export class AutomationScheduler {
     }
   }
 
-  // Schedule daily video generation
   private setupDailyVideoGeneration(): void {
     // Run every day at 9 AM UTC
     const dailyTask = cron.schedule('0 9 * * *', async () => {
       await this.generateDailyContent();
-    }, {
-      scheduled: false,
-      timezone: "UTC"
-    });
+    }, { scheduled: false, timezone: "UTC" });
 
-    // Also run every 6 hours for more frequent content
+    // Run every 6 hours
     const frequentTask = cron.schedule('0 */6 * * *', async () => {
       await this.generateDailyContent();
-    }, {
-      scheduled: false,
-      timezone: "UTC"
-    });
+    }, { scheduled: false, timezone: "UTC" });
 
     this.tasks.push(dailyTask, frequentTask);
-    logger.info('📅 Daily video generation scheduled');
+    logger.info('📅 Daily video generation scheduled (9 AM UTC and every 6 hours)');
   }
 
-  // Schedule trending video analysis
   private setupTrendingAnalysis(): void {
     // Run every 2 hours
     const trendingTask = cron.schedule('0 */2 * * *', async () => {
       await this.analyzeTrendingContent();
-    }, {
-      scheduled: false,
-      timezone: "UTC"
-    });
+    }, { scheduled: false, timezone: "UTC" });
 
     this.tasks.push(trendingTask);
-    logger.info('📈 Trending analysis scheduled');
+    logger.info('📈 Trending analysis scheduled (every 2 hours)');
   }
 
-  // Schedule performance monitoring
   private setupPerformanceMonitoring(): void {
     // Run every hour
     const monitoringTask = cron.schedule('0 * * * *', async () => {
       await this.monitorPerformance();
-    }, {
-      scheduled: false,
-      timezone: "UTC"
-    });
+    }, { scheduled: false, timezone: "UTC" });
 
     this.tasks.push(monitoringTask);
-    logger.info('📊 Performance monitoring scheduled');
+    logger.info('📊 Performance monitoring scheduled (every hour)');
   }
 
-  // Schedule cleanup tasks
   private setupCleanupTasks(): void {
     // Run daily at 2 AM UTC
     const cleanupTask = cron.schedule('0 2 * * *', async () => {
       await this.performCleanup();
-    }, {
-      scheduled: false,
-      timezone: "UTC"
-    });
+    }, { scheduled: false, timezone: "UTC" });
 
     this.tasks.push(cleanupTask);
-    logger.info('🧹 Cleanup tasks scheduled');
+    logger.info('🧹 Cleanup tasks scheduled (daily at 2 AM UTC)');
   }
 
   // Start all scheduled tasks
@@ -126,9 +103,9 @@ export class AutomationScheduler {
     try {
       this.tasks.forEach(task => task.start());
       this.status.isRunning = true;
-      // This nextRun logic might need refinement based on actual task schedules
-      this.status.nextRun = new Date(Date.now() + 60 * 60 * 1000); // Placeholder: next hour
-      
+      // Attempt to set nextRun based on the first task's schedule (simplified)
+      // A more robust approach would track all tasks' next dates.
+      this.status.nextRun = new Date(Date.now() + 60 * 60 * 1000); 
       logger.info('🚀 Automation Scheduler started');
     } catch (error: any) {
       logger.error('❌ Failed to start scheduler:', error);
@@ -142,7 +119,6 @@ export class AutomationScheduler {
       this.tasks.forEach(task => task.stop());
       this.status.isRunning = false;
       this.status.nextRun = null;
-      
       logger.info('⏹️ Automation Scheduler stopped');
     } catch (error: any) {
       logger.error('❌ Failed to stop scheduler:', error);
@@ -150,11 +126,10 @@ export class AutomationScheduler {
     }
   }
 
-  // Generate daily content and produce a video
+  // Main task: Hunt, generate script, produce video
   private async generateDailyContent(): Promise<void> {
-    // Prevent multiple instances of this task from running concurrently
     if (this.status.isRunning) {
-      logger.info('⚠️ Content generation task already running, skipping...');
+      logger.info('⚠️ Content generation task already running, skipping this run.');
       return;
     }
 
@@ -164,54 +139,54 @@ export class AutomationScheduler {
     try {
       logger.info('🎬 Starting daily content generation and video production...');
 
-      // Step 1: Hunt for trending topics (ContentEngine method does not take args)
+      // Step 1: Hunt for trending topics
       const trendingTopics = await this.contentEngine.huntTrendingVideos(); 
 
       if (!trendingTopics || trendingTopics.length === 0) {
-        throw new Error('No trending topics found');
+        throw new Error('No trending topics found from ContentEngine.');
       }
 
-      // Step 2: Select the first trending topic as the inspiration
+      // Step 2: Select the first trending topic as inspiration
       const selectedTopic = trendingTopics[0];
-      logger.info(`📝 Selected topic for inspiration: ${selectedTopic.title}`);
+      logger.info(`📝 Selected topic for inspiration: "${selectedTopic.title}"`);
 
-      // Step 3: Generate content script using trending topics
-      // ContentEngine's analyzeAndGenerateContent takes TrendingVideo[] and returns VideoScript[]
+      // Step 3: Generate content script(s)
       const generatedScripts = await this.contentEngine.analyzeAndGenerateContent(trendingTopics);
 
       if (!generatedScripts || generatedScripts.length === 0) {
-        throw new Error('Content script generation failed');
+        throw new Error('Content script generation failed from ContentEngine.');
       }
 
-      // For this run, let's focus on the first generated script
       const videoScript = generatedScripts[0]; 
-      logger.info(`📝 Generated script for: "${videoScript.title}"`);
+      logger.info(`📝 Generated script title: "${videoScript.title}"`);
 
-      // Step 4: Produce video from the generated script
-      // Ensure VideoProducer.createVideo returns a structure like VideoProductionResult
-      const videoProductionResult: VideoProductionResult = await this.videoProducer.createVideo(
-        videoScript // Pass the entire VideoScript object
-      );
+      // Step 4: Produce the video
+      const videoConfig: VideoConfig = {
+        // Map VideoScript properties to VideoConfig, providing defaults
+        niche: videoScript.tags?.includes('tech') ? 'tech' : 
+               videoScript.tags?.includes('travel') ? 'travel' : 
+               'general', 
+        duration: videoScript.segments.reduce((sum, segment) => sum + segment.duration, 0) || 60, 
+        resolution: '1080p', // Default resolution
+        style: videoScript.segments.length > 0 ? videoScript.segments[0].background_type : 'vlog', 
+      };
 
-      // Check if video production was successful and has an ID
+      const videoProductionResult: VideoProductionResult = await this.videoProducer.createVideo(videoConfig);
+
       if (videoProductionResult && videoProductionResult.success && videoProductionResult.videoId) {
-        logger.info(`✅ Video produced successfully: ID ${videoProductionResult.videoId}`);
-        
-        this.status.totalVideosProd++; // Increment counter
-        
-        // Log the video creation to the database
+        logger.info(`✅ Video produced successfully by producer: ID ${videoProductionResult.videoId}`);
+        this.status.totalVideosProd++;
         await this.logVideoCreation(videoProductionResult.videoId, selectedTopic.title);
       } else {
-        // Throw error if production failed or didn't yield an ID
         const errorMessage = videoProductionResult?.error || 'Video production failed, no videoId provided.';
         throw new Error(errorMessage);
       }
 
     } catch (error: any) {
-      logger.error('❌ Daily content generation/production failed:', error);
+      logger.error('❌ Daily content generation/production process failed:', error);
       this.status.errors.push(`Content generation/production error: ${error.message}`);
     } finally {
-      this.status.isRunning = false; // Mark task as finished
+      this.status.isRunning = false; 
     }
   }
 
@@ -219,40 +194,35 @@ export class AutomationScheduler {
   private async analyzeTrendingContent(): Promise<void> {
     try {
       logger.info('📈 Analyzing trending content...');
-
-      // Hunt for trending videos (this method doesn't take args)
       const trendingVideos = await this.contentEngine.huntTrendingVideos();
       
       if (trendingVideos && trendingVideos.length > 0) {
-        // Store trending analysis in database
-        if (supabase) {
-          // Ensure your 'trending_analysis' table has these columns: analyzed_at, video_count, top_categories, analysis_data
-          await supabase
+        if (this.supabaseClient) {
+          await this.supabaseClient
             .from('trending_analysis')
             .insert({
               analyzed_at: new Date().toISOString(),
               video_count: trendingVideos.length,
-              top_categories: this.extractCategories(trendingVideos), // Your helper method
-              analysis_data: trendingVideos // Store the full data
+              top_categories: this.extractCategories(trendingVideos),
+              analysis_data: trendingVideos 
             });
+        } else {
+          logger.error("Supabase client not available for trending analysis.");
         }
-
-        logger.info(`📊 Analyzed ${trendingVideos.length} trending videos`);
+        logger.info(`📊 Analyzed ${trendingVideos.length} trending videos and stored data.`);
       } else {
-        logger.warn('No trending videos found for analysis.');
+        logger.warn('No trending videos found to analyze.');
       }
-
     } catch (error: any) {
       logger.error('❌ Trending analysis failed:', error);
       this.status.errors.push(`Trending analysis error: ${error.message}`);
     }
   }
 
-  // Monitor performance metrics and store them
+  // Monitor performance metrics
   private async monitorPerformance(): Promise<void> {
     try {
-      logger.info('📊 Monitoring performance...');
-
+      logger.info('📊 Monitoring performance metrics...');
       const stats = {
         totalVideos: this.status.totalVideosProd,
         uptime: process.uptime(),
@@ -262,98 +232,83 @@ export class AutomationScheduler {
         timestamp: new Date().toISOString()
       };
 
-      // Store performance metrics
-      if (supabase) {
-        // Ensure your 'performance_metrics' table has these columns: totalVideos, uptime, memoryUsage, errorCount, lastRun, timestamp
-        await supabase
-          .from('performance_metrics')
-          .insert(stats);
+      if (this.supabaseClient) {
+        await this.supabaseClient.from('performance_metrics').insert(stats);
+      } else {
+        logger.error("Supabase client not available for performance monitoring.");
       }
-
-      logger.info('📈 Performance metrics recorded');
-
+      logger.info('📈 Performance metrics recorded.');
     } catch (error: any) {
       logger.error('❌ Performance monitoring failed:', error);
       this.status.errors.push(`Performance monitoring error: ${error.message}`);
     }
   }
 
-  // Perform cleanup tasks (e.g., deleting old files, database records)
+  // Perform cleanup tasks
   private async performCleanup(): Promise<void> {
     try {
-      logger.info('🧹 Performing cleanup...');
+      logger.info('🧹 Performing cleanup tasks...');
 
-      // Clean up old temporary files (if VideoProducer creates temporary files)
-      // You might need to tell VideoProducer to clean up its temp dir
+      // Call cleanup on VideoProducer
       if (this.videoProducer && typeof this.videoProducer.cleanup === 'function') {
         await this.videoProducer.cleanup();
       } else {
         logger.warn('VideoProducer does not have a cleanup method.');
       }
 
-      // Clear old errors (keep only last 10)
+      // Trim errors array
       if (this.status.errors.length > 10) {
         this.status.errors = this.status.errors.slice(-10);
       }
 
-      // Clean up old database records (older than 30 days)
-      if (supabase) {
+      // Cleanup old database records
+      if (this.supabaseClient) {
         const thirtyDaysAgo = new Date();
         thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
-        // Assuming 'timestamp' column in 'performance_metrics'
-        await supabase
-          .from('performance_metrics')
-          .delete()
-          .lt('timestamp', thirtyDaysAgo.toISOString());
-
-        // Assuming 'analyzed_at' column in 'trending_analysis'
-        await supabase
-          .from('trending_analysis')
-          .delete()
-          .lt('analyzed_at', thirtyDaysAgo.toISOString());
+        await this.supabaseClient.from('performance_metrics').delete().lt('timestamp', thirtyDaysAgo.toISOString());
+        await this.supabaseClient.from('trending_analysis').delete().lt('analyzed_at', thirtyDaysAgo.toISOString());
+      } else {
+        logger.error("Supabase client not available for cleanup.");
       }
-
-      logger.info('✅ Cleanup completed');
-
+      logger.info('✅ Cleanup tasks completed.');
     } catch (error: any) {
       logger.error('❌ Cleanup failed:', error);
       this.status.errors.push(`Cleanup error: ${error.message}`);
     }
   }
 
-  // Helper method to extract categories from trending videos for analysis summary
-  private extractCategories(videos: any[]): string[] {
-    // Assuming each video object has a 'category' property
+  // Helper to extract top 5 categories
+  private extractCategories(videos: TrendingVideo[]): string[] {
     const categories = videos
-      .map((video: any) => video.category || 'Uncategorized')
+      .map((video: TrendingVideo) => video.category || 'Uncategorized')
       .reduce((acc: { [key: string]: number }, cat: string) => {
         acc[cat] = (acc[cat] || 0) + 1;
         return acc;
       }, {});
 
-    // Sort categories by count and return top 5
     return Object.keys(categories)
       .sort((a, b) => categories[b] - categories[a])
       .slice(0, 5);
   }
 
-  // Log video creation success to the database
+  // Log video creation to database
   private async logVideoCreation(videoId: string, topic: string): Promise<void> {
     try {
-      if (supabase) {
-        // Ensure 'video_logs' table has: video_id, topic, created_at, status
-        await supabase
-          .from('video_logs')
-          .insert({
-            video_id: videoId,
-            topic: topic,
-            created_at: new Date().toISOString(),
-            status: 'produced' // Mark as produced, not uploaded yet
-          });
+      if (!this.supabaseClient) {
+          logger.error("Supabase client not available for logging video creation.");
+          return;
       }
+      await this.supabaseClient
+        .from('video_logs')
+        .insert({
+          video_id: videoId,
+          topic: topic,
+          created_at: new Date().toISOString(),
+          status: 'produced'
+        });
     } catch (error: any) {
-      logger.error('❌ Failed to log video creation:', error);
+      logger.error(`Failed to log video creation for video ID ${videoId}:`, error);
     }
   }
 
@@ -376,13 +331,14 @@ export class AutomationScheduler {
   }
 
   // Manual trigger for content generation and video production
-  public async triggerContentGeneration(): Promise<VideoProcessingResult> {
+  // Returns VideoProductionResult for immediate feedback if possible
+  public async triggerContentGeneration(): Promise<VideoProductionResult> { 
     try {
       await this.generateDailyContent();
-      // This trigger doesn't directly return the videoId, just confirms the process ran.
-      // You might want to adjust this to return actual results if needed.
-      return { success: true, message: "Content generation and video production initiated." };
+      // Indicate success for the trigger itself. The actual videoId might not be available immediately here.
+      return { success: true }; // Return a simple success object.
     } catch (error: any) {
+      // Return error in the expected format
       return { success: false, error: error.message };
     }
   }
