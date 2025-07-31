@@ -1,610 +1,529 @@
-import ffmpeg from 'fluent-ffmpeg';
+import { createClient } from '@supabase/supabase-js';
+import { google } from 'googleapis';
+import OpenAI from 'openai';
 import fs from 'fs-extra';
 import path from 'path';
-import { createCanvas, loadImage, registerFont } from 'canvas';
+import sharp from 'sharp';
+import ffmpeg from 'fluent-ffmpeg';
 import axios from 'axios';
-import OpenAI from 'openai';
+import { v4 as uuidv4 } from 'uuid';
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
-
-export interface VideoConfig {
+// --- EXPORTED INTERFACES ---
+export interface TrendingVideo {
+  id: string;
   title: string;
+  description: string;
+  views: number;
+  channelTitle: string;
+  publishedAt: string;
+  thumbnailUrl: string;
+  tags: string[];
+  category: string;
+}
+
+export interface VideoScript {
+  title: string;
+  description: string;
   script: string;
+  tags: string[];
+  thumbnail_text: string;
   hook: string;
-  niche: string;
-  duration: number;
-  resolution: '720p' | '1080p' | '4K';
-  style: 'modern' | 'vintage' | 'minimalist' | 'vibrant';
+  segments: Array<{
+    text: string;
+    duration: number;
+    background_type: 'image' | 'video' | 'animation';
+    background_prompt?: string;
+  }>;
 }
 
-export interface VideoAssets {
-  audioPath: string;
-  thumbnailPath: string;
-  backgroundImages: string[];
-  subtitles?: SubtitleEntry[];
+// --- VIDEO PRODUCTION RESULT INTERFACE (REQUIRED FOR AUTOMATION SCHEDULER) ---
+// This MUST match the interface expected by AutomationScheduler
+export interface VideoProductionResult {
+  success: boolean;
+  videoId?: string; // A unique ID for the produced video
+  filePath?: string; // Path to the generated video file
+  error?: string;    // Error message if success is false
 }
 
-export interface SubtitleEntry {
-  start: number;
-  end: number;
-  text: string;
-}
-
-export class VideoProducer {
-  private outputDir: string;
-  private tempDir: string;
-  private fontsLoaded: boolean = false;
+// --- YOUTUBE CONTENT ENGINE CLASS ---
+export class YouTubeContentEngine {
+  private supabase: any;
+  private youtube: any;
+  private openai: OpenAI;
+  private isRunning = false; // Not currently used for start/stop logic directly
 
   constructor() {
-    this.outputDir = path.join(__dirname, '../../output');
-    this.tempDir = path.join(__dirname, '../../temp');
-    this.ensureDirectories();
-  }
+    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_KEY) throw new Error("Supabase credentials missing");
+    if (!process.env.YOUTUBE_API_KEY) throw new Error("YouTube API key missing");
+    if (!process.env.OPENAI_API_KEY) throw new Error("OpenAI API key missing");
 
-  private async ensureDirectories(): Promise<void> {
-    await fs.ensureDir(path.join(this.outputDir, 'videos'));
-    await fs.ensureDir(path.join(this.outputDir, 'audio'));
-    await fs.ensureDir(path.join(this.outputDir, 'thumbnails'));
-    await fs.ensureDir(path.join(this.outputDir, 'images'));
-    await fs.ensureDir(this.tempDir);
-  }
-
-  private async loadFonts(): Promise<void> {
-    if (this.fontsLoaded) return;
-
-    try {
-      // Download and register fonts if they don't exist
-      const fontsDir = path.join(__dirname, '../../assets/fonts');
-      await fs.ensureDir(fontsDir);
-
-      const fontUrls = {
-        'Roboto-Bold.ttf': 'https://fonts.gstatic.com/s/roboto/v30/KFOlCnqEu92Fr1MmWUlfBBc4.woff2',
-        'OpenSans-Regular.ttf': 'https://fonts.gstatic.com/s/opensans/v34/memSYaGs126MiZpBA-UvWbX2vVnXBbObj2OVZyOOSr4dVJWUgsjZ0C4nY1M2xLER.woff2'
-      };
-
-      for (const [filename, url] of Object.entries(fontUrls)) {
-        const fontPath = path.join(fontsDir, filename);
-        
-        if (!await fs.pathExists(fontPath)) {
-          console.log(`📥 Downloading font: ${filename}`);
-          // Note: In production, you'd want to use actual TTF files
-          // This is just for demonstration - you'd need proper font files
-        }
-
-        try {
-          registerFont(fontPath, { family: filename.split('-')[0] });
-        } catch (error) {
-          console.warn(`⚠️ Could not load font ${filename}:`, error);
-        }
-      }
-
-      this.fontsLoaded = true;
-    } catch (error) {
-      console.warn('⚠️ Font loading failed, using system fonts:', error);
-      this.fontsLoaded = true;
-    }
-  }
-
-  async createVideo(config: VideoConfig): Promise<string> {
-    console.log(`🎬 Starting video production: "${config.title}"`);
+    this.supabase = createClient(
+      process.env.SUPABASE_URL!,
+      process.env.SUPABASE_KEY!
+    );
     
-    try {
-      // Load fonts first
-      await this.loadFonts();
-
-      // Generate all assets
-      const assets = await this.generateAssets(config);
-
-      // Create the final video
-      const videoPath = await this.assembleVideo(config, assets);
-
-      console.log(`✅ Video created successfully: ${videoPath}`);
-      return videoPath;
-
-    } catch (error) {
-      console.error('❌ Video production failed:', error);
-      throw error;
-    }
-  }
-
-  private async generateAssets(config: VideoConfig): Promise<VideoAssets> {
-    console.log('🎨 Generating video assets...');
-
-    const [audioPath, thumbnailPath, backgroundImages] = await Promise.all([
-      this.generateVoiceover(config.script, config.title),
-      this.generateThumbnail(config.title, config.niche, config.style),
-      this.generateBackgroundImages(config.niche, 5)
-    ]);
-
-    return {
-      audioPath,
-      thumbnailPath,
-      backgroundImages,
-      subtitles: this.generateSubtitles(config.script)
-    };
-  }
-
-  private async generateVoiceover(script: string, title: string): Promise<string> {
-    console.log('🎵 Generating AI voiceover...');
-
-    try {
-      const response = await openai.audio.speech.create({
-        model: 'tts-1-hd',
-        voice: 'nova',
-        input: script,
-        response_format: 'mp3',
-        speed: 1.0
-      });
-
-      const audioBuffer = Buffer.from(await response.arrayBuffer());
-      const audioPath = path.join(this.outputDir, 'audio', `${this.sanitizeFilename(title)}.mp3`);
-      
-      await fs.writeFile(audioPath, audioBuffer);
-      console.log(`✅ Voiceover saved: ${audioPath}`);
-      
-      return audioPath;
-
-    } catch (error) {
-      console.error('❌ Voiceover generation failed:', error);
-      throw new Error(`Failed to generate voiceover: ${error}`);
-    }
-  }
-
-  private async generateThumbnail(title: string, niche: string, style: string): Promise<string> {
-    console.log('🖼️ Generating thumbnail...');
-
-    const canvas = createCanvas(1280, 720);
-    const ctx = canvas.getContext('2d');
-
-    // Style configurations
-    const styles = {
-      modern: {
-        bgGradient: ['#667eea', '#764ba2'],
-        textColor: '#ffffff',
-        accentColor: '#ff6b6b'
-      },
-      vintage: {
-        bgGradient: ['#8B4513', '#D2691E'],
-        textColor: '#F5F5DC',
-        accentColor: '#FFD700'
-      },
-      minimalist: {
-        bgGradient: ['#ffffff', '#f8f9fa'],
-        textColor: '#333333',
-        accentColor: '#007bff'
-      },
-      vibrant: {
-        bgGradient: ['#ff9a9e', '#fecfef'],
-        textColor: '#ffffff',
-        accentColor: '#ffd700'
-      }
-    };
-
-    const currentStyle = styles[style as keyof typeof styles] || styles.modern;
-
-    // Create gradient background
-    const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
-    gradient.addColorStop(0, currentStyle.bgGradient[0]);
-    gradient.addColorStop(1, currentStyle.bgGradient[1]);
-    
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    // Add overlay pattern
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
-    for (let i = 0; i < canvas.width; i += 40) {
-      for (let j = 0; j < canvas.height; j += 40) {
-        if ((i + j) % 80 === 0) {
-          ctx.fillRect(i, j, 20, 20);
-        }
-      }
-    }
-
-    // Title text
-    ctx.fillStyle = currentStyle.textColor;
-    ctx.font = 'bold 48px Arial, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-
-    // Text shadow
-    ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
-    ctx.shadowBlur = 10;
-    ctx.shadowOffsetX = 2;
-    ctx.shadowOffsetY = 2;
-
-    // Word wrap title
-    const words = title.split(' ');
-    const lines: string[] = [];
-    let currentLine = '';
-
-    for (const word of words) {
-      const testLine = currentLine + (currentLine ? ' ' : '') + word;
-      const metrics = ctx.measureText(testLine);
-      
-      if (metrics.width > canvas.width - 100 && currentLine) {
-        lines.push(currentLine);
-        currentLine = word;
-      } else {
-        currentLine = testLine;
-      }
-    }
-    if (currentLine) lines.push(currentLine);
-
-    // Draw title lines
-    const startY = canvas.height / 2 - (lines.length - 1) * 30;
-    lines.forEach((line, index) => {
-      ctx.fillText(line, canvas.width / 2, startY + index * 60);
+    this.youtube = google.youtube({
+      version: 'v3',
+      auth: process.env.YOUTUBE_API_KEY
     });
 
-    // Niche tag
-    ctx.shadowColor = 'transparent';
-    ctx.fillStyle = currentStyle.accentColor;
-    ctx.font = 'bold 24px Arial, sans-serif';
-    ctx.fillText(`#${niche.toUpperCase()}`, canvas.width / 2, canvas.height - 60);
-
-    // Save thumbnail
-    const thumbnailPath = path.join(this.outputDir, 'thumbnails', `${this.sanitizeFilename(title)}.png`);
-    const buffer = canvas.toBuffer('image/png');
-    await fs.writeFile(thumbnailPath, buffer);
-
-    console.log(`✅ Thumbnail saved: ${thumbnailPath}`);
-    return thumbnailPath;
+    this.openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY
+    });
   }
 
-  private async generateBackgroundImages(niche: string, count: number): Promise<string[]> {
-    console.log(`🖼️ Generating ${count} background images...`);
-
-    const images: string[] = [];
-    
+  // Hunt for trending videos with 500k+ views
+  // NOTE: This method does NOT take arguments as per your previous logs.
+  async huntTrendingVideos(): Promise<TrendingVideo[]> {
     try {
-      // Generate images using DALL-E
-      for (let i = 0; i < count; i++) {
-        const prompt = `A beautiful, high-quality background image related to ${niche}, abstract, modern, suitable for video background, 16:9 aspect ratio, vibrant colors`;
-        
-        try {
-          const response = await openai.images.generate({
-            model: 'dall-e-3',
-            prompt,
-            size: '1792x1024',
-            quality: 'standard',
-            n: 1
-          });
+      console.log('🔍 Hunting for trending videos...');
+      
+      const response = await this.youtube.videos.list({
+        part: ['snippet', 'statistics'],
+        chart: 'mostPopular',
+        regionCode: 'US', // You can change this to your target region
+        maxResults: 50,
+        videoCategoryId: '22', // People & Blogs category ID. Adjust if needed.
+      });
 
-          const imageUrl = response.data[0].url;
-          if (imageUrl) {
-            const imageResponse = await axios.get(imageUrl, { responseType: 'arraybuffer' });
-            const imagePath = path.join(this.outputDir, 'images', `bg_${niche}_${i + 1}.png`);
-            
-            await fs.writeFile(imagePath, imageResponse.data);
-            images.push(imagePath);
-            
-            console.log(`✅ Background image ${i + 1} saved: ${imagePath}`);
+      const trendingVideos: TrendingVideo[] = response.data.items
+        .filter((video: any) => parseInt(video.statistics.viewCount) >= 500000)
+        .map((video: any) => ({
+          id: video.id,
+          title: video.snippet.title,
+          description: video.snippet.description,
+          views: parseInt(video.statistics.viewCount),
+          channelTitle: video.snippet.channelTitle,
+          publishedAt: video.snippet.publishedAt,
+          thumbnailUrl: video.snippet.thumbnails.maxres?.url || video.snippet.thumbnails.high.url,
+          tags: video.snippet.tags || [],
+          category: video.snippet.categoryId // This is a category ID, not a name. Might need mapping.
+        }));
+
+      console.log(`📊 Found ${trendingVideos.length} trending videos with 500k+ views`);
+      
+      // Store in database for analysis
+      await this.storeTrendingVideos(trendingVideos);
+      
+      return trendingVideos;
+    } catch (error: any) {
+      console.error('❌ Error hunting trending videos:', error.message);
+      return [];
+    }
+  }
+
+  // Analyze trending patterns and generate unique content scripts
+  async analyzeAndGenerateContent(trendingVideos: TrendingVideo[]): Promise<VideoScript[]> {
+    try {
+      console.log('🤖 Analyzing trends and generating unique content...');
+      
+      const scripts: VideoScript[] = [];
+      
+      // Limit to processing the first 3 trending videos for script generation
+      for (let i = 0; i < Math.min(3, trendingVideos.length); i++) {
+        const video = trendingVideos[i];
+        
+        const prompt = `
+        Analyze this trending YouTube video and create a COMPLETELY UNIQUE video script inspired by its success:
+        
+        Title: ${video.title}
+        Views: ${video.views.toLocaleString()}
+        Description: ${video.description.substring(0, 500)}
+        Tags: ${video.tags.join(', ')}
+        
+        Create a unique video script that:
+        1. Uses similar trending topics but with a fresh angle
+        2. Has an attention-grabbing hook in first 3 seconds
+        3. Is 60-90 seconds long for maximum engagement
+        4. Includes 8-12 segments with specific visuals
+        5. Has trending hashtags and SEO-optimized title
+        6. Is completely original content, not copying
+        
+        Return JSON format ONLY. Do not include any extra text before or after the JSON.
+        The JSON structure should be:
+        {
+          "title": "Viral title with trending keywords",
+          "description": "SEO optimized description with hashtags",
+          "script": "Full narration script",
+          "tags": ["trending", "keywords"],
+          "thumbnail_text": "Eye-catching thumbnail text",
+          "hook": "First 3-second hook line",
+          "segments": [
+            {
+              "text": "Narration for this segment",
+              "duration": 8, // Duration in seconds
+              "background_type": "image", // or "video" or "animation"
+              "background_prompt": "AI image generation prompt for this segment's background"
+            }
+          ]
+        }
+        `;
+
+        const completion = await this.openai.chat.completions.create({
+          model: "gpt-4", // Or "gpt-4o" for newer capabilities
+          messages: [{ role: "user", content: prompt }],
+          temperature: 0.8, // Higher temperature for more creativity
+          max_tokens: 2000 // Adjust as needed
+        });
+
+        try {
+          // Ensure the response content is treated as a string before parsing
+          const responseContent = completion.choices[0]?.message?.content;
+          if (!responseContent) {
+            console.error('❌ OpenAI API returned no content for script generation.');
+            continue; // Skip to the next video if no content
           }
-        } catch (error) {
-          console.warn(`⚠️ Failed to generate image ${i + 1}, using fallback`);
-          // Create a fallback colored background
-          const fallbackPath = await this.createFallbackImage(niche, i);
-          images.push(fallbackPath);
+
+          const scriptData: VideoScript = JSON.parse(responseContent);
+          scripts.push(scriptData);
+          console.log(`✅ Generated script: "${scriptData.title}"`);
+          
+          // Small delay to avoid hitting OpenAI rate limits
+          await this.sleep(2000); // 2 seconds
+        } catch (parseError: any) {
+          console.error('❌ Error parsing AI response JSON:', parseError.message);
+          console.log('Received response content:', completion.choices[0]?.message?.content); // Log the actual response
+        }
+      }
+      
+      return scripts;
+    } catch (error: any) {
+      console.error('❌ Error in analyzeAndGenerateContent:', error.message);
+      return [];
+    }
+  }
+
+  // Create actual video from script. THIS MUST RETURN VideoProductionResult
+  async createVideo(script: VideoScript): Promise<VideoProductionResult> {
+    try {
+      console.log(`🎬 Creating video: "${script.title}"`);
+      
+      const videoId = uuidv4();
+      // Use a temporary directory that's unique per video creation
+      const tempDir = path.join(process.cwd(), 'temp', videoId);
+      await fs.ensureDir(tempDir);
+
+      // Generate voiceover using OpenAI TTS
+      const audioPath = await this.generateVoiceover(script.script, tempDir);
+      if (!audioPath) throw new Error("Failed to generate voiceover.");
+      
+      // Generate visual content for each segment
+      const visualPaths: string[] = [];
+      for (const segment of script.segments) {
+        const visualPath = await this.generateVisual(segment, tempDir);
+        if (visualPath) {
+          visualPaths.push(visualPath);
+        } else {
+          console.warn(`⚠️ Could not generate visual for segment: ${segment.text}`);
         }
       }
 
-    } catch (error) {
-      console.warn('⚠️ DALL-E generation failed, creating fallback images');
-      
-      // Create fallback images
-      for (let i = 0; i < count; i++) {
-        const fallbackPath = await this.createFallbackImage(niche, i);
-        images.push(fallbackPath);
+      if (visualPaths.length === 0) {
+        throw new Error("No visuals could be generated for the video.");
       }
+
+      // Create thumbnail (currently static, can be enhanced)
+      const thumbnailPath = await this.generateThumbnail(script.thumbnail_text, tempDir);
+
+      // Assemble final video using FFmpeg
+      const finalVideoPath = await this.assembleVideo(audioPath, visualPaths, tempDir, script);
+
+      console.log(`✅ Video created successfully. Path: ${finalVideoPath}`);
+      // Return the expected structure
+      return { success: true, videoId: videoId, filePath: finalVideoPath };
+      
+    } catch (error: any) {
+      console.error('❌ Error in createVideo:', error.message);
+      // Return the expected error structure
+      return { success: false, error: error.message };
     }
-
-    return images;
   }
 
-  private async createFallbackImage(niche: string, index: number): Promise<string> {
-    const canvas = createCanvas(1920, 1080);
-    const ctx = canvas.getContext('2d');
-
-    // Color palettes for different niches
-    const palettes = {
-      tech: ['#667eea', '#764ba2', '#f093fb'],
-      lifestyle: ['#ffecd2', '#fcb69f', '#ff9a9e'],
-      business: ['#a8edea', '#fed6e3', '#667eea'],
-      health: ['#d299c2', '#fef9d7', '#89f7fe'],
-      default: ['#ff9a9e', '#fecfef', '#fad0c4']
-    };
-
-    const colors = palettes[niche as keyof typeof palettes] || palettes.default;
-    const color1 = colors[index % colors.length];
-    const color2 = colors[(index + 1) % colors.length];
-
-    // Create gradient
-    const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
-    gradient.addColorStop(0, color1);
-    gradient.addColorStop(1, color2);
+  // Generate AI voiceover
+  private async generateVoiceover(script: string, outputDir: string): Promise<string | null> {
+    const audioPath = path.join(outputDir, 'voiceover.mp3');
     
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    // Add geometric shapes
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
-    for (let i = 0; i < 20; i++) {
-      const x = Math.random() * canvas.width;
-      const y = Math.random() * canvas.height;
-      const size = Math.random() * 100 + 50;
-      
-      ctx.beginPath();
-      ctx.arc(x, y, size, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    const imagePath = path.join(this.outputDir, 'images', `fallback_${niche}_${index}.png`);
-    const buffer = canvas.toBuffer('image/png');
-    await fs.writeFile(imagePath, buffer);
-
-    return imagePath;
-  }
-
-  private generateSubtitles(script: string): SubtitleEntry[] {
-    const sentences = script.split(/[.!?]+/).filter(s => s.trim().length > 0);
-    const avgWordsPerSecond = 2.5; // Approximate speaking speed
-    
-    let currentTime = 0;
-    const subtitles: SubtitleEntry[] = [];
-
-    sentences.forEach(sentence => {
-      const words = sentence.trim().split(/\s+/);
-      const duration = words.length / avgWordsPerSecond;
-      
-      subtitles.push({
-        start: currentTime,
-        end: currentTime + duration,
-        text: sentence.trim()
-      });
-      
-      currentTime += duration + 0.5; // Small pause between sentences
-    });
-
-    return subtitles;
-  }
-
-  private async assembleVideo(config: VideoConfig, assets: VideoAssets): Promise<string> {
-    console.log('🎞️ Assembling final video...');
-
-    const outputPath = path.join(this.outputDir, 'videos', `${this.sanitizeFilename(config.title)}.mp4`);
-    
-    return new Promise((resolve, reject) => {
-      let ffmpegCommand = ffmpeg();
-
-      // Add background images as input (slideshow)
-      assets.backgroundImages.forEach(imagePath => {
-        ffmpegCommand = ffmpegCommand.input(imagePath);
+    try {
+      const mp3 = await this.openai.audio.speech.create({
+        model: "tts-1-hd", // Use a high-quality model
+        voice: "nova", // A good, clear voice for engagement. Experiment with others!
+        input: script,
+        speed: 1.1 // Slightly faster for YouTube retention.
       });
 
+      // OpenAI returns an array buffer, convert it to a buffer
+      const buffer = Buffer.from(await mp3.arrayBuffer());
+      await fs.writeFile(audioPath, buffer);
+      
+      console.log('🔊 Voiceover generated:', audioPath);
+      return audioPath;
+    } catch (error: any) {
+      console.error('❌ Error generating voiceover:', error.message);
+      return null;
+    }
+  }
+
+  // Generate visual content (image) using AI
+  private async generateVisual(segment: any, outputDir: string): Promise<string | null> {
+    try {
+      if (segment.background_type === 'image' && segment.background_prompt) {
+        console.log(`🎨 Generating visual for: "${segment.background_prompt}"`);
+        const response = await this.openai.images.generate({
+          model: "dall-e-3", // DALL-E 3 for higher quality
+          prompt: `High-quality, engaging visual for a YouTube video segment: ${segment.background_prompt}. Style: vibrant, modern, suitable for vertical format. Focus on clarity and visual appeal.`,
+          size: "1024x1792", // Vertical format (aspect ratio 9:16) suitable for Shorts/Reels
+          quality: "hd", // High quality
+          n: 1, // Generate one image
+        });
+
+        const imageUrl = response.data[0]?.url;
+        if (!imageUrl) {
+            console.error('❌ DALL-E 3 API returned no image URL.');
+            return null;
+        }
+
+        const imagePath = path.join(outputDir, `visual_${Date.now()}.png`);
+        
+        // Download and save image
+        const imageResponse = await axios.get(imageUrl, { responseType: 'arraybuffer' });
+        await fs.writeFile(imagePath, imageResponse.data);
+        
+        // Resize and crop image to fit the video aspect ratio (1080x1920)
+        const processedPath = path.join(outputDir, `processed_visual_${Date.now()}.png`);
+        await sharp(imagePath)
+          .resize(1080, 1920, { fit: 'cover', position: 'center' }) // Cover crops to fit, center positions it
+          .png() // Save as PNG
+          .toFile(processedPath);
+        
+        console.log('🖼️ Visual generated and processed:', processedPath);
+        return processedPath;
+      } else if (segment.background_type !== 'image') {
+        console.warn(`⚠️ Unsupported background type: ${segment.background_type}. Skipping visual generation for this segment.`);
+        return null;
+      } else {
+        console.warn(`⚠️ Missing background_prompt for image segment. Skipping visual generation.`);
+        return null;
+      }
+    } catch (error: any) {
+      console.error('❌ Error generating visual:', error.message);
+      return null;
+    }
+  }
+
+  // Generate eye-catching thumbnail (currently static, can be enhanced)
+  private async generateThumbnail(text: string, outputDir: string): Promise<string> {
+    const thumbnailPath = path.join(outputDir, 'thumbnail.png');
+    
+    try {
+      // Basic thumbnail generation: a colored background with text overlay
+      // You can enhance this using AI image generation for thumbnails too!
+      await sharp({
+        create: {
+          width: 1280, // Standard thumbnail width
+          height: 720, // Standard thumbnail height
+          channels: 4,
+          background: { r: 255, g: 100, b: 0, alpha: 1 } // Bright orange background
+        }
+      })
+      .composite([
+        {
+          input: Buffer.from(
+            `<svg><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="white" font-size="60">${text}</text></svg>`
+          ),
+          top: 0, // Adjust Y position as needed
+          left: 0, // Adjust X position as needed
+        },
+      ])
+      .png()
+      .toFile(thumbnailPath);
+
+      console.log('🖼️ Thumbnail generated:', thumbnailPath);
+      return thumbnailPath;
+    } catch (error: any) {
+      console.error('❌ Error generating thumbnail:', error.message);
+      // Return a default path or null if generation fails
+      return path.join(__dirname, 'default_thumbnail.png'); // You might need a default thumbnail image
+    }
+  }
+
+  // Assemble final video with FFmpeg
+  private async assembleVideo(audioPath: string, visualPaths: string[], outputDir: string, script: VideoScript): Promise<string> {
+    return new Promise(async (resolve, reject) => {
+      const outputPath = path.join(outputDir, 'final_video.mp4');
+      
+      let command = ffmpeg();
+      
+      // Add all visual inputs. Ensure they are in the correct order.
+      visualPaths.forEach((visualPath, index) => {
+        command = command.input(visualPath);
+      });
+      
       // Add audio input
-      ffmpegCommand = ffmpegCommand.input(assets.audioPath);
-
-      // Resolution settings
-      const resolutions = {
-        '720p': { width: 1280, height: 720 },
-        '1080p': { width: 1920, height: 1080 },
-        '4K': { width: 3840, height: 2160 }
-      };
+      command = command.input(audioPath);
       
-      const { width, height } = resolutions[config.resolution];
-
-      ffmpegCommand
+      // FFmpeg complex filtergraph for creating a slideshow and scaling
+      // n=${visualPaths.length}:v=1:a=0 --> concat n inputs, 1 video stream, 0 audio streams
+      // [slideshow] --> the output pad name of the concat filter
+      // scale=1080:1920:force_original_aspect_ratio=decrease --> scales the video to fit within 1080x1920
+      // pad=1080:1920:(ow-iw)/2:(oh-ih)/2 --> adds black bars if the aspect ratio doesn't match
+      // [video] --> the final video output pad name
+      command
         .complexFilter([
-          // Create slideshow from images
-          `concat=n=${assets.backgroundImages.length}:v=1:a=0[slideshow]`,
-          // Scale to desired resolution
-          `[slideshow]scale=${width}:${height}[video]`
+          `concat=n=${visualPaths.length}:v=1:a=0[slideshow]`,
+          `[slideshow]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2[video]`
         ])
         .outputOptions([
-          '-map', '[video]',
-          '-map', `${assets.backgroundImages.length}:a`, // Audio from last input
-          '-c:v', 'libx264',
-          '-c:a', 'aac',
-          '-b:v', '2M',
-          '-b:a', '192k',
-          '-preset', 'medium',
-          '-crf', '23',
-          '-pix_fmt', 'yuv420p',
-          '-movflags', '+faststart'
+          '-map', '[video]', // Map the final video stream
+          '-map', `${visualPaths.length}:a`, // Map the audio stream from the last input (audio is appended last)
+          '-c:v', 'libx264', // Video codec
+          '-preset', 'medium', // Encoding preset (faster for 'medium', better quality for 'slow'/'veryslow')
+          '-crf', '23', // Constant Rate Factor (lower = better quality, higher = smaller file size). 18-28 is common.
+          '-c:a', 'aac', // Audio codec
+          '-b:a', '128k', // Audio bitrate
+          '-r', '30', // Video frame rate
+          '-shortest' // Finish encoding when the shortest input stream ends (usually audio)
         ])
-        .format('mp4')
-        .on('start', (command) => {
-          console.log('🎬 FFmpeg started:', command);
-        })
+        .output(outputPath)
         .on('progress', (progress) => {
-          console.log(`🎞️ Processing: ${Math.round(progress.percent || 0)}%`);
+          // Optional: Log progress
+          // console.log(`Processing: ${progress.frames} frames processed.`);
         })
         .on('end', () => {
-          console.log('✅ Video assembly completed');
+          console.log(`✅ Video assembly finished: ${outputPath}`);
           resolve(outputPath);
         })
-        .on('error', (error) => {
-          console.error('❌ Video assembly failed:', error);
-          reject(error);
+        .on('error', (err: any) => {
+          console.error('❌ FFmpeg error during video assembly:', err.message);
+          reject(err);
         })
-        .save(outputPath);
+        .run();
     });
   }
 
-  private sanitizeFilename(filename: string): string {
-    return filename
-      .replace(/[^\w\s-]/g, '') // Remove special characters
-      .replace(/\s+/g, '-') // Replace spaces with hyphens
-      .toLowerCase()
-      .substring(0, 100); // Limit length
-  }
+  // Upload to YouTube
+  async uploadToYouTube(videoPath: string, script: VideoScript): Promise<boolean> {
+    try {
+      console.log(`📤 Uploading to YouTube: "${script.title}"`);
+      
+      if (!process.env.YOUTUBE_CLIENT_ID || !process.env.YOUTUBE_CLIENT_SECRET || !process.env.YOUTUBE_REDIRECT_URI || !process.env.YOUTUBE_REFRESH_TOKEN) {
+        throw new Error("Missing YouTube OAuth credentials in environment variables.");
+      }
 
-  async createCustomVideo(options: {
-    images: string[];
-    audioPath: string;
-    title: string;
-    subtitles?: SubtitleEntry[];
-    effects?: string[];
-  }): Promise<string> {
-    console.log(`🎬 Creating custom video: ${options.title}`);
-
-    const outputPath = path.join(
-      this.outputDir,
-      'videos',
-      `custom_${this.sanitizeFilename(options.title)}.mp4`
-    );
-
-    return new Promise((resolve, reject) => {
-      let ffmpegCommand = ffmpeg();
-
-      // Add image inputs
-      options.images.forEach(imagePath => {
-        ffmpegCommand = ffmpegCommand.input(imagePath);
+      const auth = new google.auth.OAuth2(
+        process.env.YOUTUBE_CLIENT_ID,
+        process.env.YOUTUBE_CLIENT_SECRET,
+        process.env.YOUTUBE_REDIRECT_URI
+      );
+      
+      auth.setCredentials({
+        refresh_token: process.env.YOUTUBE_REFRESH_TOKEN
       });
 
-      // Add audio input
-      ffmpegCommand = ffmpegCommand.input(options.audioPath);
+      // Refresh token if expired (important for long-running processes)
+      // This might require an async method to get a new access token if it's expired.
+      // For simplicity, we assume the refresh token is valid.
 
-      ffmpegCommand
-        .complexFilter([
-          `concat=n=${options.images.length}:v=1:a=0[slideshow]`,
-          '[slideshow]scale=1920:1080[video]'
-        ])
-        .outputOptions([
-          '-map', '[video]',
-          '-map', `${options.images.length}:a`,
-          '-c:v', 'libx264',
-          '-c:a', 'aac',
-          '-shortest' // Stop when shortest input ends
-        ])
-        .format('mp4')
-        .on('end', () => resolve(outputPath))
-        .on('error', reject)
-        .save(outputPath);
-    });
-  }
-
-  async addSubtitlesToVideo(videoPath: string, subtitles: SubtitleEntry[]): Promise<string> {
-    console.log('📝 Adding subtitles to video...');
-
-    const outputPath = videoPath.replace('.mp4', '_subtitled.mp4');
-    
-    // Create SRT subtitle file
-    const srtPath = path.join(this.tempDir, `subtitles_${Date.now()}.srt`);
-    const srtContent = this.generateSRTFile(subtitles);
-    await fs.writeFile(srtPath, srtContent);
-
-    return new Promise((resolve, reject) => {
-      ffmpeg(videoPath)
-        .input(srtPath)
-        .outputOptions([
-          '-c:v', 'copy',
-          '-c:a', 'copy',
-          '-c:s', 'mov_text',
-          '-metadata:s:s:0', 'language=eng'
-        ])
-        .format('mp4')
-        .on('end', async () => {
-          await fs.remove(srtPath); // Clean up temp file
-          resolve(outputPath);
-        })
-        .on('error', async (error) => {
-          await fs.remove(srtPath); // Clean up temp file
-          reject(error);
-        })
-        .save(outputPath);
-    });
-  }
-
-  private generateSRTFile(subtitles: SubtitleEntry[]): string {
-    return subtitles
-      .map((subtitle, index) => {
-        const startTime = this.formatSRTTime(subtitle.start);
-        const endTime = this.formatSRTTime(subtitle.end);
-        
-        return `${index + 1}\n${startTime} --> ${endTime}\n${subtitle.text}\n`;
-      })
-      .join('\n');
-  }
-
-  private formatSRTTime(seconds: number): string {
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const secs = Math.floor(seconds % 60);
-    const milliseconds = Math.floor((seconds % 1) * 1000);
-
-    return `${hours.toString().padStart(2, '0')}:${minutes
-      .toString()
-      .padStart(2, '0')}:${secs.toString().padStart(2, '0')},${milliseconds
-      .toString()
-      .padStart(3, '0')}`;
-  }
-
-  async getVideoInfo(videoPath: string): Promise<any> {
-    return new Promise((resolve, reject) => {
-      ffmpeg.ffprobe(videoPath, (error, metadata) => {
-        if (error) {
-          reject(error);
-        } else {
-          resolve(metadata);
+      const youtube = google.youtube({ version: 'v3', auth });
+      
+      const response = await youtube.videos.insert({
+        part: ['snippet', 'status'],
+        requestBody: {
+          snippet: {
+            title: script.title,
+            description: script.description,
+            tags: script.tags,
+            categoryId: '22', // 'People & Blogs' category ID. Adjust if your content is different.
+            defaultLanguage: 'en',
+            defaultAudioLanguage: 'en'
+          },
+          status: {
+            privacyStatus: 'public', // Set to 'private' or 'unlisted' for testing
+            selfDeclaredMadeForKids: false // Set to true if your content is for kids
+          }
+        },
+        media: {
+          // Use createReadStream for efficient file uploading
+          body: fs.createReadStream(videoPath)
         }
       });
-    });
-  }
 
-  async optimizeForPlatform(videoPath: string, platform: 'youtube' | 'tiktok' | 'instagram'): Promise<string> {
-    console.log(`🎯 Optimizing video for ${platform}...`);
-
-    const platformConfigs = {
-      youtube: {
-        resolution: '1920x1080',
-        bitrate: '5M',
-        format: 'mp4'
-      },
-      tiktok: {
-        resolution: '1080x1920',
-        bitrate: '3M',
-        format: 'mp4'
-      },
-      instagram: {
-        resolution: '1080x1080',
-        bitrate: '3M',
-        format: 'mp4'
+      const uploadedVideoId = response.data.id;
+      console.log(`✅ Successfully uploaded to YouTube! Video ID: ${uploadedVideoId}`);
+      
+      // Log to database upon successful upload
+      await this.logUpload(uploadedVideoId!, script);
+      
+      return true;
+    } catch (error: any) {
+      console.error('❌ Error uploading to YouTube:', error.message);
+      // Log the detailed error if available
+      if (error.response && error.response.data) {
+          console.error('YouTube API Error Details:', JSON.stringify(error.response.data, null, 2));
       }
-    };
-
-    const config = platformConfigs[platform];
-    const outputPath = videoPath.replace('.mp4', `_${platform}.mp4`);
-
-    return new Promise((resolve, reject) => {
-      ffmpeg(videoPath)
-        .size(config.resolution)
-        .videoBitrate(config.bitrate)
-        .format(config.format)
-        .outputOptions([
-          '-c:v', 'libx264',
-          '-c:a', 'aac',
-          '-preset', 'medium',
-          '-crf', '23'
-        ])
-        .on('end', () => resolve(outputPath))
-        .on('error', reject)
-        .save(outputPath);
-    });
-  }
-
-  async cleanup(): Promise<void> {
-    console.log('🧹 Cleaning up temporary files...');
-    
-    try {
-      if (await fs.pathExists(this.tempDir)) {
-        await fs.emptyDir(this.tempDir);
-      }
-      console.log('✅ Cleanup completed');
-    } catch (error) {
-      console.error('❌ Cleanup failed:', error);
+      return false;
     }
+  }
+
+  // Store trending videos in database for analysis
+  private async storeTrendingVideos(videos: TrendingVideo[]): Promise<void> {
+    try {
+      if (!this.supabase) {
+          console.error("Supabase client not initialized.");
+          return;
+      }
+      // Use upsert to update existing records or insert new ones
+      const { error } = await this.supabase
+        .from('trending_videos')
+        .upsert(videos.map(video => ({
+          video_id: video.id, // Use video_id as the primary key for upsert
+          title: video.title,
+          views: video.views,
+          channel_title: video.channelTitle,
+          published_at: video.publishedAt,
+          analyzed_at: new Date().toISOString(),
+          data: video // Store the full video object for detailed analysis if needed
+        })));
+
+      if (error) console.error('Supabase DB error when storing trending videos:', error.message);
+      else console.log(`Stored ${videos.length} trending videos in Supabase.`);
+    } catch (error: any) {
+      console.error('Error in storeTrendingVideos:', error.message);
+    }
+  }
+
+  // Log successful uploads to the database
+  private async logUpload(videoId: string, script: VideoScript): Promise<void> {
+    try {
+      if (!this.supabase) {
+          console.error("Supabase client not initialized.");
+          return;
+      }
+      await this.supabase
+        .from('uploaded_videos')
+        .insert({
+          youtube_video_id: videoId,
+          title: script.title,
+          description: script.description,
+          tags: script.tags,
+          uploaded_at: new Date().toISOString(),
+          script_data: script // Store the script used for this video
+        });
+      console.log(`Logged upload for YouTube video ID: ${videoId}`);
+    } catch (error: any) {
+      console.error('Error logging upload to Supabase:', error.message);
+    }
+  }
+
+  // Helper method for delays (used to avoid rate limits)
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  // Placeholder for cleanup if needed (e.g., deleting temp files from failed runs)
+  // The AutomationScheduler will call this.
+  async cleanup(): Promise<void> {
+      console.log("Running cleanup in ContentEngine (if applicable)...");
+      // Add any specific cleanup logic for ContentEngine here if needed.
+      // For example, deleting temp files if they are managed here.
   }
 }
