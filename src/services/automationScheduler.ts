@@ -1,454 +1,500 @@
 import cron from 'node-cron';
-import contentGenerator from './contentGenerator';
-import youtubeService from './youtubeService';
-import videoProducer from './videoProducer';
-import { supabase } from '../config/supabase';
+import { YouTubeContentEngine } from './ContentEngine';
+import { VideoProducer } from './videoProducer';
+import { supabase } from '../config/database';
+import fs from 'fs-extra';
+import path from 'path';
 
-export interface AutomationConfig {
+export interface ScheduleConfig {
+  interval: string; // Cron expression
   enabled: boolean;
-  schedule: string; // Cron expression
-  videosPerDay: number;
-  niche: string;
-  uploadSchedule: string[];
-  qualityCheck: boolean;
+  niches: string[];
+  maxVideosPerDay: number;
+  qualityThreshold: number;
 }
 
-export interface VideoJob {
-  id: string;
-  status: 'pending' | 'generating' | 'producing' | 'uploading' | 'completed' | 'failed';
-  title: string;
-  scheduled_time: Date;
-  created_at: Date;
-  completed_at?: Date;
-  video_url?: string;
-  error_message?: string;
+export interface ScheduleStatus {
+  isRunning: boolean;
+  nextRun: Date | null;
+  lastRun: Date | null;
+  totalVideosProd
+
+  successfulRuns: number;
+  failedRuns: number;
 }
 
-class AutomationScheduler {
-  private jobs: Map<string, cron.ScheduledTask> = new Map();
+export class AutomationScheduler {
+  private contentEngine: YouTubeContentEngine;
+  private videoProducer: VideoProducer;
+  private cronJob: cron.ScheduledTask | null = null;
   private isRunning: boolean = false;
-  private config: AutomationConfig = {
-    enabled: false,
-    schedule: '0 */6 * * *', // Every 6 hours
-    videosPerDay: 4,
-    niche: 'technology',
-    uploadSchedule: ['09:00', '13:00', '17:00', '21:00'],
-    qualityCheck: true
-  };
+  private config: ScheduleConfig;
+  private status: ScheduleStatus;
+  private videosCreatedToday: number = 0;
+  private lastResetDate: string = '';
 
   constructor() {
-    this.loadConfig();
-    console.log('🤖 Automation Scheduler initialized');
+    this.contentEngine = new YouTubeContentEngine();
+    this.videoProducer = new VideoProducer();
+    
+    // Default configuration
+    this.config = {
+      interval: '0 */4 * * *', // Every 4 hours
+      enabled: false,
+      niches: ['technology', 'lifestyle', 'business', 'health', 'entertainment'],
+      maxVideosPerDay: 6,
+      qualityThreshold: 500000 // 500k views minimum
+    };
+
+    this.status = {
+      isRunning: false,
+      nextRun: null,
+      lastRun: null,
+      totalVideosProduced: 0,
+      successfulRuns: 0,
+      failedRuns: 0
+    };
+
+    this.initializeFromDatabase();
   }
 
-  /**
-   * Start the automation system
-   */
-  async start(config?: Partial<AutomationConfig>): Promise<void> {
+  private async initializeFromDatabase(): Promise<void> {
     try {
+      const { data: configData } = await supabase
+        .from('automation_config')
+        .select('*')
+        .single();
+
+      if (configData) {
+        this.config = { ...this.config, ...configData };
+      }
+
+      const { data: statusData } = await supabase
+        .from('automation_status')
+        .select('*')
+        .single();
+
+      if (statusData) {
+        this.status = {
+          ...this.status,
+          ...statusData,
+          nextRun: statusData.next_run ? new Date(statusData.next_run) : null,
+          lastRun: statusData.last_run ? new Date(statusData.last_run) : null
+        };
+      }
+
+      // Reset daily counter if it's a new day
+      const today = new Date().toDateString();
+      if (this.lastResetDate !== today) {
+        this.videosCreatedToday = 0;
+        this.lastResetDate = today;
+        await this.updateStatus();
+      }
+
+    } catch (error) {
+      console.error('Error initializing scheduler from database:', error);
+    }
+  }
+
+  async startScheduler(config?: Partial<ScheduleConfig>): Promise<void> {
+    try {
+      if (this.cronJob) {
+        this.cronJob.stop();
+      }
+
       if (config) {
         this.config = { ...this.config, ...config };
+        await this.saveConfigToDatabase();
       }
 
-      if (!youtubeService.isConfigured() || !youtubeService.isAuthenticated()) {
-        throw new Error('YouTube service not properly configured or authenticated');
+      if (!this.config.enabled) {
+        throw new Error('Scheduler is disabled in configuration');
       }
 
-      if (!contentGenerator.isConfigured()) {
-        throw new Error('Content generator not configured (missing OpenAI API key)');
-      }
+      console.log(`🚀 Starting automation scheduler with interval: ${this.config.interval}`);
 
-      // Stop any existing jobs
-      this.stop();
-
-      // Schedule main content generation job
-      const mainJob = cron.schedule(this.config.schedule, async () => {
-        await this.generateDailyContent();
+      this.cronJob = cron.schedule(this.config.interval, async () => {
+        await this.executeAutomationCycle();
       }, {
         scheduled: false,
         timezone: 'UTC'
       });
 
-      this.jobs.set('main', mainJob);
+      this.cronJob.start();
+      this.isRunning = true;
+      
+      this.status.isRunning = true;
+      this.status.nextRun = this.getNextRunTime();
+      
+      await this.updateStatus();
+      
+      console.log('✅ Automation scheduler started successfully');
+      
+    } catch (error) {
+      console.error('❌ Failed to start scheduler:', error);
+      throw error;
+    }
+  }
 
-      // Schedule upload jobs based on upload schedule
-      this.config.uploadSchedule.forEach((time, index) => {
-        const [hour, minute] = time.split(':');
-        const cronExpression = `${minute} ${hour} * * *`; // Daily at specified time
+  async stopScheduler(): Promise<void> {
+    try {
+      if (this.cronJob) {
+        this.cronJob.stop();
+        this.cronJob = null;
+      }
 
-        const uploadJob = cron.schedule(cronExpression, async () => {
-          await this.processUploadQueue();
-        }, {
-          scheduled: false,
-          timezone: 'UTC'
-        });
+      this.isRunning = false;
+      this.status.isRunning = false;
+      this.status.nextRun = null;
+      
+      await this.updateStatus();
+      
+      console.log('🛑 Automation scheduler stopped');
+      
+    } catch (error) {
+      console.error('❌ Failed to stop scheduler:', error);
+      throw error;
+    }
+  }
 
-        this.jobs.set(`upload-${index}`, uploadJob);
+  private async executeAutomationCycle(): Promise<void> {
+    if (this.videosCreatedToday >= this.config.maxVideosPerDay) {
+      console.log(`📊 Daily video limit reached (${this.config.maxVideosPerDay}). Skipping this cycle.`);
+      return;
+    }
+
+    console.log('🤖 Starting automated video creation cycle...');
+    
+    const cycleStartTime = new Date();
+    
+    try {
+      // Update status
+      this.status.lastRun = cycleStartTime;
+      await this.updateStatus();
+
+      // Select a random niche
+      const selectedNiche = this.config.niches[Math.floor(Math.random() * this.config.niches.length)];
+      console.log(`🎯 Selected niche: ${selectedNiche}`);
+
+      // Find trending videos in the niche
+      const trendingVideos = await this.contentEngine.findTrendingVideos(selectedNiche, {
+        minViews: this.config.qualityThreshold,
+        maxResults: 10,
+        publishedAfter: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) // Last 7 days
       });
 
-      // Start all jobs
-      this.jobs.forEach(job => job.start());
-      this.isRunning = true;
-
-      console.log('🚀 Automation started with config:', this.config);
-      
-      // Generate initial content if queue is empty
-      const queueSize = await this.getQueueSize();
-      if (queueSize === 0) {
-        console.log('📝 Generating initial content batch...');
-        await this.generateDailyContent();
-      }
-
-    } catch (error: any) {
-      console.error('❌ Failed to start automation:', error.message);
-      throw error;
-    }
-  }
-
-  /**
-   * Stop the automation system
-   */
-  stop(): void {
-    this.jobs.forEach((job, key) => {
-      job.destroy();
-      this.jobs.delete(key);
-    });
-    
-    this.isRunning = false;
-    console.log('⏹️ Automation stopped');
-  }
-
-  /**
-   * Generate daily content batch
-   */
-  private async generateDailyContent(): Promise<void> {
-    try {
-      console.log('🎬 Starting daily content generation...');
-
-      // Generate video ideas
-      const ideas = await contentGenerator.generateVideoIdeas(
-        this.config.niche, 
-        this.config.videosPerDay
-      );
-
-      console.log(`💡 Generated ${ideas.length} video ideas`);
-
-      // Create jobs for each idea
-      for (const idea of ideas) {
-        await this.createVideoJob(idea);
-      }
-
-      console.log('✅ Daily content generation completed');
-
-    } catch (error: any) {
-      console.error('❌ Daily content generation failed:', error.message);
-      await this.logError('content_generation', error.message);
-    }
-  }
-
-  /**
-   * Create a video production job
-   */
-  private async createVideoJob(idea: any): Promise<string> {
-    try {
-      // Generate full script
-      const script = await contentGenerator.generateScript(idea.title);
-      
-      // Generate SEO optimized metadata
-      const description = await contentGenerator.generateDescription(idea.title, script.full_script);
-      const tags = await contentGenerator.generateTags(idea.title, description);
-
-      const jobData = {
-        id: `video_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-        status: 'pending',
-        title: idea.title,
-        description,
-        tags,
-        script: script.full_script,
-        hook: script.hook,
-        niche: this.config.niche,
-        scheduled_time: this.getNextUploadSlot(),
-        created_at: new Date()
-      };
-
-      // Save to database
-      const { error } = await supabase
-        .from('video_jobs')
-        .insert([jobData]);
-
-      if (error) throw error;
-
-      console.log(`📋 Created video job: ${jobData.title}`);
-      return jobData.id;
-
-    } catch (error: any) {
-      console.error('❌ Failed to create video job:', error.message);
-      throw error;
-    }
-  }
-
-  /**
-   * Process the upload queue
-   */
-  private async processUploadQueue(): Promise<void> {
-    try {
-      console.log('🚀 Processing upload queue...');
-
-      // Get pending jobs ready for upload
-      const { data: jobs, error } = await supabase
-        .from('video_jobs')
-        .select('*')
-        .eq('status', 'pending')
-        .lte('scheduled_time', new Date().toISOString())
-        .order('scheduled_time', { ascending: true })
-        .limit(1);
-
-      if (error) throw error;
-
-      if (!jobs || jobs.length === 0) {
-        console.log('📭 No videos ready for upload');
+      if (trendingVideos.length === 0) {
+        console.log(`⚠️ No trending videos found for ${selectedNiche}. Skipping cycle.`);
         return;
       }
 
-      const job = jobs[0];
-      await this.processVideoJob(job);
+      // Select the best video to recreate
+      const targetVideo = trendingVideos[0];
+      console.log(`📹 Target video: ${targetVideo.title} (${targetVideo.viewCount} views)`);
 
-    } catch (error: any) {
-      console.error('❌ Upload queue processing failed:', error.message);
-      await this.logError('upload_queue', error.message);
-    }
-  }
-
-  /**
-   * Process a single video job
-   */
-  private async processVideoJob(job: VideoJob): Promise<void> {
-    try {
-      console.log(`🎬 Processing video job: ${job.title}`);
-
-      // Update status to generating
-      await this.updateJobStatus(job.id, 'generating');
-
-      // Generate video
-      const videoPath = await videoProducer.createVideo({
-        title: job.title,
-        script: (job as any).script,
-        hook: (job as any).hook,
-        niche: (job as any).niche
+      // Generate new content based on the trending video
+      const generatedContent = await this.contentEngine.generateContent({
+        originalTitle: targetVideo.title,
+        niche: selectedNiche,
+        targetLength: 60, // 60 seconds
+        style: 'engaging'
       });
 
-      // Update status to uploading
-      await this.updateJobStatus(job.id, 'uploading');
+      // Create the video
+      const videoConfig = {
+        title: generatedContent.title,
+        script: generatedContent.script,
+        hook: generatedContent.hook,
+        niche: selectedNiche,
+        duration: 60,
+        resolution: '1080p' as const,
+        style: 'modern' as const
+      };
+
+      const videoPath = await this.videoProducer.createVideo(videoConfig);
 
       // Upload to YouTube
-      const uploadResult = await youtubeService.uploadVideo(videoPath, {
-        title: job.title,
-        description: (job as any).description,
-        tags: (job as any).tags,
-        categoryId: this.getCategoryId((job as any).niche),
-        privacyStatus: 'public'
+      const uploadResult = await this.contentEngine.uploadToYouTube({
+        videoPath,
+        title: generatedContent.title,
+        description: generatedContent.description,
+        tags: generatedContent.tags,
+        thumbnailPath: path.join(path.dirname(videoPath), '../thumbnails', `${path.parse(videoPath).name}.png`)
       });
 
-      if (uploadResult.success) {
-        await this.updateJobStatus(job.id, 'completed', {
-          video_url: uploadResult.videoUrl,
-          completed_at: new Date()
-        });
-
-        console.log(`✅ Video uploaded successfully: ${uploadResult.videoUrl}`);
-        
-        // Clean up video file
-        await videoProducer.cleanup(videoPath);
-
-      } else {
-        await this.updateJobStatus(job.id, 'failed', {
-          error_message: error.message
+      // Log success
+      await this.logVideoCreation({
+        title: generatedContent.title,
+        niche: selectedNiche,
+        videoId: uploadResult.videoId,
+        videoPath,
+        createdAt: new Date(),
+        sourceVideoId: targetVideo.videoId,
+        sourceViews: targetVideo.viewCount
       });
-    }
-  }
 
-  /**
-   * Update job status in database
-   */
-  private async updateJobStatus(jobId: string, status: string, additionalData?: any): Promise<void> {
-    const updateData = {
-      status,
-      updated_at: new Date(),
-      ...additionalData
-    };
+      this.videosCreatedToday++;
+      this.status.totalVideosProduced++;
+      this.status.successfulRuns++;
 
-    const { error } = await supabase
-      .from('video_jobs')
-      .update(updateData)
-      .eq('id', jobId);
+      console.log(`✅ Video created and uploaded successfully: ${uploadResult.videoId}`);
+      console.log(`📊 Videos created today: ${this.videosCreatedToday}/${this.config.maxVideosPerDay}`);
 
-    if (error) {
-      console.error('❌ Failed to update job status:', error.message);
-    }
-  }
-
-  /**
-   * Get next available upload slot
-   */
-  private getNextUploadSlot(): Date {
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    
-    // Find next available time slot
-    for (const timeSlot of this.config.uploadSchedule) {
-      const [hour, minute] = timeSlot.split(':').map(Number);
-      const slotTime = new Date(today);
-      slotTime.setHours(hour, minute, 0, 0);
+    } catch (error) {
+      console.error('❌ Automation cycle failed:', error);
+      this.status.failedRuns++;
       
-      if (slotTime > now) {
-        return slotTime;
-      }
+      // Log the error
+      await this.logError({
+        error: error instanceof Error ? error.message : 'Unknown error',
+        cycle: cycleStartTime,
+        stack: error instanceof Error ? error.stack : undefined
+      });
+    } finally {
+      // Update status
+      this.status.nextRun = this.getNextRunTime();
+      await this.updateStatus();
     }
-    
-    // If no slot today, use first slot tomorrow
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    const [hour, minute] = this.config.uploadSchedule[0].split(':').map(Number);
-    tomorrow.setHours(hour, minute, 0, 0);
-    
-    return tomorrow;
   }
 
-  /**
-   * Get category ID for niche
-   */
-  private getCategoryId(niche: string): string {
-    const categories: { [key: string]: string } = {
-      'technology': '28',
-      'education': '27',
-      'entertainment': '24',
-      'gaming': '20',
-      'music': '10',
-      'news': '25',
-      'sports': '17',
-      'comedy': '23',
-      'lifestyle': '22'
-    };
-    
-    return categories[niche.toLowerCase()] || '28'; // Default to Science & Technology
-  }
-
-  /**
-   * Get current queue size
-   */
-  private async getQueueSize(): Promise<number> {
-    const { count, error } = await supabase
-      .from('video_jobs')
-      .select('*', { count: 'exact', head: true })
-      .in('status', ['pending', 'generating', 'producing']);
-
-    return error ? 0 : (count || 0);
-  }
-
-  /**
-   * Log errors for monitoring
-   */
-  private async logError(type: string, message: string): Promise<void> {
+  private async logVideoCreation(videoData: {
+    title: string;
+    niche: string;
+    videoId: string;
+    videoPath: string;
+    createdAt: Date;
+    sourceVideoId: string;
+    sourceViews: number;
+  }): Promise<void> {
     try {
-      const { error } = await supabase
-        .from('automation_logs')
-        .insert([{
-          type: 'error',
-          category: type,
-          message,
-          timestamp: new Date()
-        }]);
-
-      if (error) console.error('Failed to log error:', error.message);
-    } catch (err) {
-      console.error('Failed to log error:', err);
+      await supabase.from('created_videos').insert({
+        title: videoData.title,
+        niche: videoData.niche,
+        video_id: videoData.videoId,
+        video_path: videoData.videoPath,
+        created_at: videoData.createdAt.toISOString(),
+        source_video_id: videoData.sourceVideoId,
+        source_views: videoData.sourceViews,
+        automation_run: true
+      });
+    } catch (error) {
+      console.error('Error logging video creation:', error);
     }
   }
 
-  /**
-   * Load configuration from database
-   */
-  private async loadConfig(): Promise<void> {
+  private async logError(errorData: {
+    error: string;
+    cycle: Date;
+    stack?: string;
+  }): Promise<void> {
+    try {
+      await supabase.from('automation_errors').insert({
+        error_message: errorData.error,
+        error_stack: errorData.stack,
+        occurred_at: errorData.cycle.toISOString(),
+        cycle_id: errorData.cycle.getTime().toString()
+      });
+    } catch (error) {
+      console.error('Error logging automation error:', error);
+    }
+  }
+
+  private getNextRunTime(): Date | null {
+    if (!this.cronJob || !this.isRunning) return null;
+    
+    try {
+      // Parse the cron expression to calculate next run
+      // This is a simplified calculation - in production you'd use a proper cron parser
+      const now = new Date();
+      const nextHour = new Date(now.getTime() + 4 * 60 * 60 * 1000); // Next 4 hours (simplified)
+      return nextHour;
+    } catch (error) {
+      console.error('Error calculating next run time:', error);
+      return null;
+    }
+  }
+
+  private async updateStatus(): Promise<void> {
+    try {
+      const statusData = {
+        is_running: this.status.isRunning,
+        next_run: this.status.nextRun?.toISOString(),
+        last_run: this.status.lastRun?.toISOString(),
+        total_videos_produced: this.status.totalVideosProduced,
+        successful_runs: this.status.successfulRuns,
+        failed_runs: this.status.failedRuns,
+        videos_created_today: this.videosCreatedToday,
+        last_reset_date: this.lastResetDate,
+        updated_at: new Date().toISOString()
+      };
+
+      await supabase
+        .from('automation_status')
+        .upsert(statusData, { onConflict: 'id' });
+
+    } catch (error) {
+      console.error('Error updating status:', error);
+    }
+  }
+
+  private async saveConfigToDatabase(): Promise<void> {
+    try {
+      await supabase
+        .from('automation_config')
+        .upsert({
+          interval: this.config.interval,
+          enabled: this.config.enabled,
+          niches: this.config.niches,
+          max_videos_per_day: this.config.maxVideosPerDay,
+          quality_threshold: this.config.qualityThreshold,
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'id' });
+    } catch (error) {
+      console.error('Error saving config:', error);
+    }
+  }
+
+  // Public methods for API endpoints
+  async updateConfig(newConfig: Partial<ScheduleConfig>): Promise<void> {
+    this.config = { ...this.config, ...newConfig };
+    await this.saveConfigToDatabase();
+    
+    // Restart scheduler with new config if it's running
+    if (this.isRunning) {
+      await this.stopScheduler();
+      await this.startScheduler();
+    }
+  }
+
+  getStatus(): ScheduleStatus & { videosCreatedToday: number; config: ScheduleConfig } {
+    return {
+      ...this.status,
+      videosCreatedToday: this.videosCreatedToday,
+      config: this.config
+    };
+  }
+
+  async getRecentVideos(limit: number = 10): Promise<any[]> {
     try {
       const { data, error } = await supabase
-        .from('automation_config')
+        .from('created_videos')
         .select('*')
-        .single();
+        .eq('automation_run', true)
+        .order('created_at', { ascending: false })
+        .limit(limit);
 
-      if (data && !error) {
-        this.config = { ...this.config, ...data };
+      if (error) throw error;
+      return data || [];
+    } catch (error) {
+      console.error('Error fetching recent videos:', error);
+      return [];
+    }
+  }
+
+  async getErrorLogs(limit: number = 20): Promise<any[]> {
+    try {
+      const { data, error } = await supabase
+        .from('automation_errors')
+        .select('*')
+        .order('occurred_at', { ascending: false })
+        .limit(limit);
+
+      if (error) throw error;
+      return data || [];
+    } catch (error) {
+      console.error('Error fetching error logs:', error);
+      return [];
+    }
+  }
+
+  async getDailyStats(days: number = 7): Promise<any[]> {
+    try {
+      const { data, error } = await supabase
+        .from('created_videos')
+        .select('created_at, niche')
+        .eq('automation_run', true)
+        .gte('created_at', new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString())
+        .order('created_at', { ascending: true });
+
+      if (error) throw error;
+
+      // Group by day
+      const stats: { [key: string]: { date: string; count: number; niches: { [niche: string]: number } } } = {};
+      
+      (data || []).forEach(video => {
+        const date = new Date(video.created_at).toDateString();
+        if (!stats[date]) {
+          stats[date] = { date, count: 0, niches: {} };
+        }
+        stats[date].count++;
+        stats[date].niches[video.niche] = (stats[date].niches[video.niche] || 0) + 1;
+      });
+
+      return Object.values(stats);
+    } catch (error) {
+      console.error('Error fetching daily stats:', error);
+      return [];
+    }
+  }
+
+  async forceRunNow(): Promise<void> {
+    if (this.isRunning) {
+      console.log('🔄 Forcing automation cycle...');
+      await this.executeAutomationCycle();
+    } else {
+      throw new Error('Scheduler is not running. Start the scheduler first.');
+    }
+  }
+
+  async resetDailyCounter(): Promise<void> {
+    this.videosCreatedToday = 0;
+    this.lastResetDate = new Date().toDateString();
+    await this.updateStatus();
+    console.log('🔄 Daily video counter reset');
+  }
+
+  // Cleanup method
+  async cleanup(): Promise<void> {
+    await this.stopScheduler();
+    
+    // Clean up old temporary files
+    try {
+      const tempDir = path.join(__dirname, '../../temp');
+      const outputDir = path.join(__dirname, '../../output');
+      
+      // Remove files older than 7 days
+      const cleanupCutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+      
+      await this.cleanDirectory(tempDir, cleanupCutoff);
+      await this.cleanDirectory(path.join(outputDir, 'videos'), cleanupCutoff);
+      await this.cleanDirectory(path.join(outputDir, 'audio'), cleanupCutoff);
+      await this.cleanDirectory(path.join(outputDir, 'images'), cleanupCutoff);
+      
+      console.log('🧹 Cleanup completed');
+    } catch (error) {
+      console.error('Error during cleanup:', error);
+    }
+  }
+
+  private async cleanDirectory(dirPath: string, cutoffTime: number): Promise<void> {
+    try {
+      if (!await fs.pathExists(dirPath)) return;
+      
+      const files = await fs.readdir(dirPath);
+      
+      for (const file of files) {
+        const filePath = path.join(dirPath, file);
+        const stats = await fs.stat(filePath);
+        
+        if (stats.mtime.getTime() < cutoffTime) {
+          await fs.remove(filePath);
+          console.log(`🗑️ Removed old file: ${filePath}`);
+        }
       }
     } catch (error) {
-      console.log('Using default automation config');
-    }
-  }
-
-  /**
-   * Update configuration
-   */
-  async updateConfig(newConfig: Partial<AutomationConfig>): Promise<void> {
-    this.config = { ...this.config, ...newConfig };
-    
-    // Save to database
-    const { error } = await supabase
-      .from('automation_config')
-      .upsert([this.config]);
-
-    if (error) {
-      console.error('Failed to save config:', error.message);
-    }
-
-    // Restart automation with new config
-    if (this.isRunning) {
-      await this.start();
-    }
-  }
-
-  /**
-   * Get automation status
-   */
-  getStatus() {
-    return {
-      isRunning: this.isRunning,
-      config: this.config,
-      activeJobs: this.jobs.size,
-      nextRun: this.getNextUploadSlot()
-    };
-  }
-
-  /**
-   * Get recent jobs
-   */
-  async getRecentJobs(limit: number = 10): Promise<VideoJob[]> {
-    const { data, error } = await supabase
-      .from('video_jobs')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(limit);
-
-    return error ? [] : (data || []);
-  }
-
-  /**
-   * Manual trigger for immediate content generation
-   */
-  async triggerContentGeneration(count: number = 1): Promise<void> {
-    console.log(`🎯 Manual trigger: generating ${count} videos`);
-    
-    const ideas = await contentGenerator.generateVideoIdeas(this.config.niche, count);
-    
-    for (const idea of ideas) {
-      await this.createVideoJob(idea);
+      console.error(`Error cleaning directory ${dirPath}:`, error);
     }
   }
 }
 
-export default new AutomationScheduler();: uploadResult.error
-        });
-        console.error(`❌ Video upload failed: ${uploadResult.error}`);
-      }
-
-    } catch (error: any) {
-      console.error(`❌ Video job processing failed: ${error.message}`);
-      await this.updateJobStatus(job.id, 'failed', {
-        error_message
+export default AutomationScheduler;
