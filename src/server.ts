@@ -1,60 +1,57 @@
+// src/server.ts - Complete YouTube Automation System
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import compression from 'compression';
 import dotenv from 'dotenv';
-import cron from 'node-cron'; // Still needed for the scheduler itself
+import cron from 'node-cron'; // Needed for the scheduler's internal use
 import path from 'path';
 import fs from 'fs-extra';
 
-// Import routes
-import automationRoutes from './routes/automation'; // Assuming this route handler uses the scheduler
+// --- IMPORT NECESSARY MODULES AND SERVICES ---
+import automationRoutes from './routes/automation'; // Routes for automation control
+import { YouTubeContentEngine } from './services/ContentEngine'; // For hunting and content creation
+import { VideoProducer, VideoConfig } from './services/videoProducer'; // For video assembly
+import { AutomationScheduler } from './services/automationScheduler'; // The main orchestrator
+import supabase from './config/database'; // Supabase client singleton
+import { logger } from './utils/logger'; // Logger utility
 
-// Import your core services
-// At the top of src/server.ts
-import { YouTubeContentEngine } from './services/ContentEngine';
-import { VideoProducer, VideoConfig } from './services/videoProducer'; // Import VideoProducer and VideoConfig
-import { AutomationScheduler } from './services/automationScheduler'; // Make sure this is imported
-import supabase from './config/database'; // Ensure Supabase is imported
-import { logger } from './utils/logger'; // Ensure logger is imported 
-
-// Load environment variables from .env file
+// --- LOAD ENVIRONMENT VARIABLES ---
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // --- INITIALIZE SERVICES ---
-// The YouTubeContentEngine is for specific tasks like hunting and content generation.
+// YouTubeContentEngine for specific tasks like hunting and script generation
 const contentEngine = new YouTubeContentEngine(); 
-// The AutomationScheduler orchestrates the entire process, including scheduling and managing other services.
-const scheduler = new AutomationScheduler();
+// VideoProducer for the actual video assembly
+const videoProducer = new VideoProducer(); 
+// AutomationScheduler orchestrates the whole process, using ContentEngine and VideoProducer
+const scheduler = new AutomationScheduler(); 
 
-// --- MIDDLEWARE ---
-app.use(helmet()); // Basic security headers
+// --- MIDDLEWARE SETUP ---
+app.use(helmet()); // Add security headers
 app.use(cors());   // Enable Cross-Origin Resource Sharing
-app.use(compression()); // Gzip compression for responses
-app.use(morgan('combined')); // HTTP request logging
-app.use(express.json({ limit: '50mb' })); // Body parser for JSON payloads
-app.use(express.urlencoded({ extended: true, limit: '50mb' })); // Body parser for URL-encoded payloads
+app.use(compression()); // Enable Gzip compression for faster responses
+app.use(morgan('combined')); // HTTP request logger (e.g., 'dev', 'combined')
+app.use(express.json({ limit: '50mb' })); // Parse JSON request bodies
+app.use(express.urlencoded({ extended: true, limit: '50mb' })); // Parse URL-encoded request bodies
 
 // --- STATIC FILE SERVING ---
-// Serve generated videos and thumbnails from respective directories
-app.use('/videos', express.static(path.join(__dirname, '../temp'))); // Assuming videos are stored in temp for now
-app.use('/thumbnails', express.static(path.join(__dirname, '../temp'))); // Assuming thumbnails are stored in temp
+// Serve temporary files (videos, thumbnails, audio) for debugging or direct access if needed
+app.use('/temp', express.static(path.join(__dirname, '../temp'))); 
 
 // --- HEALTH CHECK ENDPOINT ---
 app.get('/health', (req, res) => {
-  // Basic health check - doesn't check all dependencies
   res.json({
     status: 'healthy',
     timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    memory: process.memoryUsage(),
+    uptime_seconds: process.uptime(),
+    memory_usage_bytes: process.memoryUsage(),
     environment: process.env.NODE_ENV || 'development',
-    // We can also check if Supabase client is initialized
-    supabase_client_initialized: !!supabase
+    supabase_client_initialized: !!supabase // Check if Supabase client was successfully created
   });
 });
 
@@ -66,7 +63,7 @@ app.get('/', async (req, res) => {
     
     res.json({
       message: '🚀 YouTube Automation System - Ready!',
-      version: '2.0.0', // Update version as needed
+      version: '2.0.0', // Update this as you make changes
       features: [
         '🔍 Trending Video Hunter (500k+ views)',
         '🤖 AI Content Generator (GPT-4)',
@@ -74,46 +71,46 @@ app.get('/', async (req, res) => {
         '🎵 AI Voiceover (OpenAI TTS)',
         '🖼️ AI Thumbnail Generation',
         '📤 YouTube Auto-Upload',
-        '⏰ 24/7 Automation Scheduler', // This refers to the cron jobs within AutomationScheduler
+        '⏰ Scheduled Automation Tasks',
         '📊 Analytics & Monitoring'
       ],
       status: {
-        // Use the scheduler's status
         automation_scheduler: schedulerStatus.isRunning ? 'RUNNING' : 'STOPPED',
         automation_last_run: schedulerStatus.lastRun,
         automation_total_videos_produced: schedulerStatus.totalVideosProd,
-        services: {
-          youtube_api: process.env.YOUTUBE_API_KEY ? '✅ CONFIGURED' : '❌ MISSING',
-          openai: process.env.OPENAI_API_KEY ? '✅ CONFIGURED' : '❌ MISSING',
-          supabase: process.env.SUPABASE_URL && process.env.SUPABASE_KEY ? '✅ CONFIGURED' : '❌ MISSING',
-          // unsplash: process.env.UNSPLASH_ACCESS_KEY ? '✅ CONFIGURED' : '⚠️ OPTIONAL' // If you use Unsplash
+        services_configured: {
+          youtube_api: !!process.env.YOUTUBE_API_KEY,
+          openai: !!process.env.OPENAI_API_KEY,
+          supabase: !!process.env.SUPABASE_URL && !!process.env.SUPABASE_KEY,
         }
       },
       endpoints: {
-        // These are the endpoints exposed by your automationRoutes
+        // These refer to the routes defined in your automationRoutes file
         automation_start: 'POST /automation/start',
         automation_stop: 'POST /automation/stop',
         automation_status: 'GET /automation/status',
-        automation_trending_analysis: 'GET /automation/trending', // Endpoint for manual analysis
-        automation_test_generation: 'POST /automation/test-generate', // Endpoint for manual generation
-        automation_uploads: 'GET /automation/uploads', // Assuming this fetches upload history
+        automation_trending_analysis: 'GET /automation/trending', // Manual trending analysis trigger
+        automation_test_generation: 'POST /automation/test-generate', // Manual content generation trigger
         system_health: 'GET /health',
         system_config: 'GET /config',
         system_metrics: 'GET /metrics',
-        manual_video_create: 'POST /create-video' // Example test endpoint
+        manual_video_create_test: 'POST /create-video', // Endpoint for direct video creation testing
+        scheduler_start: 'POST /scheduler/start',
+        scheduler_stop: 'POST /scheduler/stop',
+        scheduler_status: 'GET /scheduler/status'
       },
       quickStart: [
         '1. Ensure all API keys and Supabase credentials are configured in your environment.',
-        '2. POST to `/automation/start` to begin the automated workflow.',
-        '3. Monitor status with `GET /automation/status`.',
+        '2. POST to `/scheduler/start` to activate the automation.',
+        '3. Monitor status with `GET /scheduler/status` or `GET /automation/status`.',
         '4. Check logs for detailed progress and errors.'
       ]
     });
-  } catch (error) {
-    logger.error('Error fetching system status:', error); // Use your logger
+  } catch (error: any) {
+    logger.error('Error fetching system status:', error);
     res.status(500).json({
       message: 'System status check failed',
-      error: error instanceof Error ? error.message : 'Unknown error'
+      error: error.message || 'Unknown error'
     });
   }
 });
@@ -130,30 +127,20 @@ app.get('/config', (req, res) => {
     'SUPABASE_KEY'
   ];
 
-  // const optionalEnvVars = ['UNSPLASH_ACCESS_KEY']; // If you use other services
-
   const configStatus = {
-    required: {} as any,
-    // optional: {} as any,
+    required: {} as Record<string, string>, // Explicit type
     missing: [] as string[],
     ready: true
   };
 
-  // Check required variables
   requiredEnvVars.forEach(envVar => {
     const isConfigured = !!process.env[envVar];
     configStatus.required[envVar] = isConfigured ? '✅ CONFIGURED' : '❌ MISSING';
-    
     if (!isConfigured) {
       configStatus.missing.push(envVar);
       configStatus.ready = false;
     }
   });
-
-  // Check optional variables (if any)
-  // optionalEnvVars.forEach(envVar => {
-  //   configStatus.optional[envVar] = process.env[envVar] ? '✅ CONFIGURED' : '⚠️ NOT SET';
-  // });
 
   res.json({
     status: configStatus.ready ? 'READY' : 'INCOMPLETE',
@@ -162,39 +149,38 @@ app.get('/config', (req, res) => {
       message: 'Missing required environment variables. Please set them.',
       missing: configStatus.missing,
       setup_guide: {
-        youtube: 'Get YouTube API credentials from Google Cloud Console',
-        openai: 'Get OpenAI API key from OpenAI platform',
-        supabase: 'Create Supabase project and get URL + anon key'
+        youtube: 'Get YouTube API credentials from Google Cloud Console.',
+        openai: 'Get OpenAI API key from OpenAI platform.',
+        supabase: 'Create a Supabase project and get URL + anon key.'
       }
     } : 'All required configurations are set!'
   });
 });
 
 // --- MOUNT ROUTES ---
-// Mount the automation routes. These routes will likely control the AutomationScheduler.
+// Mount the automation-related routes. These should interact with the AutomationScheduler.
 app.use('/automation', automationRoutes);
 
 // --- MANUAL VIDEO CREATION ENDPOINT (for testing) ---
-// This is a separate endpoint for testing video production directly.
 app.post('/create-video', async (req, res) => {
   try {
-    const { title, script, niche, duration, style, resolution } = req.body;
+    const { title, script, niche, duration, resolution, style } = req.body;
     
-    if (!title || !script || !niche) {
+    if (!title || !script || !niche) { // Check for minimal required fields
       return res.status(400).json({
         success: false,
         message: 'Missing required fields: title, script, niche'
       });
     }
 
-    logger.info(`🎬 Manual video creation requested: ${title}`);
+    logger.info(`🎬 Manual video creation requested for: "${title}"`);
     
-    // Construct the VideoConfig object required by VideoProducer
+    // Construct the VideoConfig object for the producer
     const videoConfig: VideoConfig = {
-      title: title, // You might need to pass title separately or include it in script
-      script: script, // Pass the script directly
+      title: title, // Pass title if needed by producer
+      script: script, // Pass the script itself
       niche: niche,
-      duration: duration || 60, // Default to 60 if not provided
+      duration: duration || 60, // Default duration
       resolution: resolution || '1080p', // Default resolution
       style: style || 'modern' // Default style
     };
@@ -240,7 +226,6 @@ app.get('/metrics', async (req, res) => {
       system: {
         uptime_seconds: process.uptime(),
         memory_usage_bytes: process.memoryUsage(),
-        // cpu_usage is not directly available in Node.js without external modules
         platform: process.platform,
         node_version: process.version
       },
@@ -249,12 +234,12 @@ app.get('/metrics', async (req, res) => {
         last_run: schedulerStatus.lastRun,
         total_videos_produced: schedulerStatus.totalVideosProd,
         errors_count: schedulerStatus.errors.length,
-        // Could add more from scheduler.getStats()
+        // Get more detailed stats if available from scheduler
       },
       services_configured: {
         youtube_api: !!process.env.YOUTUBE_API_KEY,
         openai_configured: !!process.env.OPENAI_API_KEY,
-        supabase_configured: !!process.env.SUPABASE_URL,
+        supabase_configured: !!process.env.SUPABASE_URL && !!process.env.SUPABASE_KEY,
         database_connected: !!supabase // Check if Supabase client is initialized
       }
     });
@@ -274,7 +259,6 @@ app.get('/metrics', async (req, res) => {
 // Start the automation scheduler
 app.post('/scheduler/start', (req, res) => {
   try {
-    // Check if scheduler is already running to avoid multiple starts
     if (scheduler.getStatus().isRunning) {
       return res.status(409).json({
         success: false,
@@ -282,18 +266,14 @@ app.post('/scheduler/start', (req, res) => {
       });
     }
     
-    // Initialize the scheduler if it hasn't been (or if it was stopped)
-    // This might be redundant if initialize() is called on server start,
-    // but good to have for robustness if start is called after a stop.
+    // Initialize the scheduler to set up its cron jobs
     scheduler.initialize(); 
-    
     // Start the scheduler
     scheduler.start();
     
     res.json({
       success: true,
       message: 'Automation scheduler started',
-      // You might want to return the scheduler's next run time or status
       status: scheduler.getStatus()
     });
   } catch (error: any) {
@@ -309,7 +289,6 @@ app.post('/scheduler/start', (req, res) => {
 // Stop the automation scheduler
 app.post('/scheduler/stop', (req, res) => {
   try {
-    // Check if scheduler is actually running before trying to stop
     if (!scheduler.getStatus().isRunning) {
       return res.status(409).json({
         success: false,
@@ -348,112 +327,93 @@ app.use('*', (req, res) => {
     success: false,
     message: `Route ${req.originalUrl} not found`,
     availableRoutes: [
-      'GET /',
-      'GET /health',
-      'GET /config',
-      'GET /metrics',
-      'POST /create-video', // Manual video creation test endpoint
-      'POST /scheduler/start',
-      'POST /scheduler/stop',
-      'GET /scheduler/status',
-      'POST /automation/start', // These likely trigger scheduler or engine actions
-      'POST /automation/stop',
-      'GET /automation/status',
-      'GET /automation/trending',
-      'POST /automation/test-generate'
+      'GET /', 'GET /health', 'GET /config', 'GET /metrics',
+      'POST /create-video', 'POST /scheduler/start', 'POST /scheduler/stop', 'GET /scheduler/status',
+      'POST /automation/start', 'POST /automation/stop', 'GET /automation/status',
+      'GET /automation/trending', 'POST /automation/test-generate'
     ]
   });
 });
 
 // --- GLOBAL ERROR HANDLING MIDDLEWARE ---
-// Catch-all for any unhandled errors
 app.use((error: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   logger.error('Unhandled error caught by global handler:', error);
   
   res.status(error.status || 500).json({
     success: false,
     message: error.message || 'An internal server error occurred.',
-    // Include stack trace only in development for debugging
-    ...(process.env.NODE_ENV === 'development' && { stack: error.stack })
+    ...(process.env.NODE_ENV === 'development' && { stack: error.stack }) // Include stack in development
   });
 });
 
 // --- GRACEFUL SHUTDOWN HANDLING ---
-// Listen for termination signals and shut down cleanly
 const gracefulShutdown = (signal: string) => {
-  console.log(`\n🛑 ${signal} received. Shutting down gracefully...`);
+  logger.warn(`\n🛑 ${signal} received. Shutting down gracefully...`);
   
-  // Stop the scheduler if it's running
+  // Stop the scheduler
   if (scheduler.getStatus().isRunning) {
     scheduler.stop();
-    console.log('Automation scheduler stopped.');
+    logger.info('Automation scheduler stopped.');
   }
   
-  // You might also want to stop the contentEngine if it has long-running processes not managed by the scheduler
-  // For example, if contentEngine had its own startAutomation() that was a perpetual loop.
-  // if (contentEngine.getStatus().isRunning) {
-  //   contentEngine.stopAutomation(); // Assuming ContentEngine has this method
+  // Stop the contentEngine if it has its own running processes
+  // For example, if contentEngine.startAutomation() was a perpetual loop not managed by scheduler.
+  // if (contentEngine.getStatus().isRunning) { // Assuming ContentEngine has a getStatus() and stopAutomation()
+  //   contentEngine.stopAutomation(); 
   // }
 
-  console.log('Shutdown complete. Exiting.');
-  process.exit(0); // Exit the process
+  logger.info('Shutdown complete. Exiting.');
+  process.exit(0);
 };
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-// --- SERVER STARTUP ---
+// --- SERVER BOOTSTRAP ---
 const bootstrap = async () => {
-  console.log('\n🚀 Starting YouTube Automation System...\n');
+  logger.info('\n🚀 Starting YouTube Automation System...\n');
   
   // Ensure necessary output directories exist
   try {
-    await fs.ensureDir(path.join(__dirname, '../temp')); // Use 'temp' for intermediate files
-    // If you have a permanent 'output' dir, ensure that too
-    // await fs.ensureDir(path.join(__dirname, '../output/videos'));
-    // await fs.ensureDir(path.join(__dirname, '../output/thumbnails'));
-    // await fs.ensureDir(path.join(__dirname, '../output/audio'));
-  } catch (error) {
-    logger.error("Error ensuring output directories exist:", error);
-    // Decide if this is a critical error preventing startup
-    // process.exit(1);
+    await fs.ensureDir(path.join(__dirname, '../temp')); // Intermediate files
+  } catch (error: any) {
+    logger.error("Error ensuring temporary directories exist:", error.message);
   }
   
-  // Initialize the AutomationScheduler. This sets up the cron jobs.
+  // Initialize the AutomationScheduler (sets up cron jobs)
   try {
     scheduler.initialize();
-    console.log('Automation scheduler initialized.');
+    logger.info('Automation scheduler initialized.');
   } catch (error: any) {
     logger.error('Failed to initialize Automation Scheduler:', error.message);
-    // Decide if this is critical. If scheduler is core, you might exit.
   }
 
-  // Start the server
+  // Start the Express server
   app.listen(PORT, () => {
-    console.log(`\n📡 Server running on port ${PORT}`);
-    console.log(`🌐 API available at: http://localhost:${PORT}`);
-    console.log(`📊 System status: http://localhost:${PORT}/`);
-    console.log(`⚙️  Configuration check: http://localhost:${PORT}/config`);
-    console.log(`📈 Metrics: http://localhost:${PORT}/metrics`);
+    logger.info(`\n✅ Server running on port ${PORT}`);
+    logger.info(`🌐 API available at: http://localhost:${PORT}`);
+    logger.info(`📊 System status: http://localhost:${PORT}/`);
+    logger.info(`⚙️  Configuration check: http://localhost:${PORT}/config`);
+    logger.info(`📈 Metrics: http://localhost:${PORT}/metrics`);
     
-    // Optionally auto-start the scheduler in production or if configured
+    // Auto-start scheduler in production or if configured via env var
     if (process.env.NODE_ENV === 'production' || process.env.AUTO_START_SCHEDULER === 'true') {
-      console.log('\n🔄 Auto-starting automation scheduler...');
+      logger.info('\n🔄 Auto-starting automation scheduler...');
       try {
-        scheduler.start(); // Start the scheduler if auto-start is enabled
-        console.log('Automation scheduler started automatically.');
+        scheduler.start(); 
+        logger.info('Automation scheduler started automatically.');
       } catch (error: any) {
         logger.error('Failed to auto-start automation scheduler:', error.message);
       }
     } else {
-      console.log('\nℹ️ Automation scheduler is not set to auto-start. Use POST /scheduler/start to activate.');
+      logger.info('\nℹ️ Automation scheduler is not set to auto-start. Use POST /scheduler/start to activate.');
     }
     
-    console.log('\n✅ YouTube Automation System Ready!\n');
+    logger.info('\n✅ YouTube Automation System Ready!\n');
   });
 };
 
 // Bootstrap the application
 bootstrap();
 
-export default app; // Export app for potential testing or other uses
+export default app;
