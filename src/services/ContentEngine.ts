@@ -1,6 +1,4 @@
-// src/services/ContentEngine.ts
-
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { google } from 'googleapis';
 import OpenAI from 'openai';
 import fs from 'fs-extra';
@@ -10,13 +8,12 @@ import ffmpeg from 'fluent-ffmpeg';
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
 
-// --- IMPORT NECESSARY TYPES FOR SUPABASE AND OTHER LIBS ---
-// Adjust path if necessary
+// --- IMPORT NECESSARY TYPES AND UTILITIES ---
+// Adjust paths as per your project structure
 import supabase, { SupabaseClient } from '../config/database'; 
-// Assuming logger is available globally or imported similarly
 import { logger } from '../utils/logger'; 
 
-// --- EXPORTED INTERFACES ---
+// --- EXPORTED INTERFACES (SHARED WITH AUTOMATION SCHEDULER) ---
 export interface TrendingVideo {
   id: string;
   title: string;
@@ -26,7 +23,7 @@ export interface TrendingVideo {
   publishedAt: string;
   thumbnailUrl: string;
   tags: string[];
-  category: string; // Category ID, potentially needs mapping to names
+  category: string; // Category ID, may need mapping to names
 }
 
 export interface VideoScript {
@@ -55,20 +52,21 @@ export interface VideoProductionResult {
 
 // --- YOUTUBE CONTENT ENGINE CLASS ---
 export class YouTubeContentEngine {
-  private supabaseClient: SupabaseClient | null = null; // Use the imported type
+  private supabaseClient: SupabaseClient | null = null;
   private youtube: any;
   private openai: OpenAI;
-  // private isRunning = false; // Property not used for current logic
 
   constructor() {
-    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_KEY) {
-        logger.error("Supabase credentials missing in ContentEngine constructor.");
+    // Ensure Supabase client is available
+    if (!supabase) { // Check the imported client directly
+        logger.error("Supabase client is not initialized in ContentEngine constructor.");
     } else {
-        this.supabaseClient = supabase; // Use the imported client
+        this.supabaseClient = supabase;
     }
     
-    if (!process.env.YOUTUBE_API_KEY) throw new Error("YouTube API key missing");
-    if (!process.env.OPENAI_API_KEY) throw new Error("OpenAI API key missing");
+    // Check required API keys
+    if (!process.env.YOUTUBE_API_KEY) throw new Error("YouTube API key is missing.");
+    if (!process.env.OPENAI_API_KEY) throw new Error("OpenAI API key is missing.");
 
     this.youtube = google.youtube({
       version: 'v3',
@@ -93,7 +91,7 @@ export class YouTubeContentEngine {
         videoCategoryId: '22', // 'People & Blogs'. Adjust if your content is different.
       });
 
-      // Safely access items using optional chaining
+      // Safely access items using optional chaining and check for existence
       const videosData = response.data?.items;
       if (!videosData) {
           logger.warn("YouTube API response did not contain video items.");
@@ -111,12 +109,11 @@ export class YouTubeContentEngine {
           publishedAt: video.snippet.publishedAt,
           thumbnailUrl: video.snippet.thumbnails.maxres?.url || video.snippet.thumbnails.high.url,
           tags: video.snippet.tags || [],
-          category: video.snippet.categoryId // This is a category ID
+          category: video.snippet.categoryId // Category ID
         }));
 
       logger.info(`📊 Found ${trendingVideos.length} trending videos with 500k+ views.`);
       
-      // Store in database for analysis
       await this.storeTrendingVideos(trendingVideos);
       
       return trendingVideos;
@@ -193,7 +190,7 @@ export class YouTubeContentEngine {
           await this.sleep(2000); // 2-second delay between AI calls
         } catch (parseError: any) {
           logger.error('Error parsing AI response JSON:', parseError.message);
-          logger.debug('Received response content:', responseContent); // Log content for debugging
+          logger.debug('Received response content:', responseContent);
         }
       }
       
@@ -267,7 +264,7 @@ export class YouTubeContentEngine {
         const response = await this.openai.images.generate({
           model: "dall-e-3", 
           prompt: `High-quality, engaging visual for a YouTube video segment: ${segment.background_prompt}. Style: vibrant, modern, suitable for vertical format. Focus on clarity and visual appeal.`,
-          size: "1024x1792", // Vertical format (9:16 aspect ratio)
+          size: "1024x1792", 
           quality: "hd", 
           n: 1, 
         });
@@ -284,7 +281,7 @@ export class YouTubeContentEngine {
         
         const processedPath = path.join(outputDir, `processed_visual_${Date.now()}.png`);
         await sharp(imagePath)
-          .resize(1080, 1920, { fit: 'cover', position: 'center' }) // Fit to 1080x1920 vertical video
+          .resize(1080, 1920, { fit: 'cover', position: 'center' }) 
           .png() 
           .toFile(processedPath);
         
@@ -309,10 +306,10 @@ export class YouTubeContentEngine {
     try {
       await sharp({
         create: {
-          width: 1280, // Standard thumbnail width
-          height: 720, // Standard thumbnail height
+          width: 1280, 
+          height: 720, 
           channels: 4,
-          background: { r: 255, g: 100, b: 0, alpha: 1 } // Bright orange background
+          background: { r: 255, g: 100, b: 0, alpha: 1 } 
         }
       })
       .composite([
@@ -331,7 +328,7 @@ export class YouTubeContentEngine {
       return thumbnailPath;
     } catch (error: any) {
       logger.error('Error generating thumbnail:', error.message);
-      return path.join(__dirname, 'default_thumbnail.png'); // Fallback to a default thumbnail if needed
+      return path.join(__dirname, 'default_thumbnail.png'); // Fallback to a default thumbnail
     }
   }
 
@@ -354,7 +351,7 @@ export class YouTubeContentEngine {
         ])
         .outputOptions([
           '-map', '[video]', 
-          `-map ${visualPaths.length}:a`, // Map audio from the last input
+          `-map ${visualPaths.length}:a`, 
           '-c:v', 'libx264',
           '-preset', 'medium',
           '-crf', '23', 
@@ -365,7 +362,7 @@ export class YouTubeContentEngine {
         ])
         .output(outputPath)
         .on('progress', (progress) => {
-          // Optional: log progress
+          // logger.debug(`Processing: ${progress.frames} frames processed.`);
         })
         .on('end', () => {
           logger.info(`✅ Video assembly finished: ${outputPath}`);
@@ -411,8 +408,8 @@ export class YouTubeContentEngine {
             defaultAudioLanguage: 'en'
           },
           status: {
-            privacyStatus: 'public', // Set to 'private' or 'unlisted' for testing
-            selfDeclaredMadeForKids: false // Set according to your content's nature
+            privacyStatus: 'public', 
+            selfDeclaredMadeForKids: false 
           }
         },
         media: {
@@ -488,7 +485,5 @@ export class YouTubeContentEngine {
 
   async cleanup(): Promise<void> {
       logger.info("Running cleanup in ContentEngine...");
-      // Example: Clean up temporary files if managed by ContentEngine
-      // You might iterate through temp directories and remove them.
   }
 }
