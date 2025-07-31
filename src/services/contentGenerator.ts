@@ -1,311 +1,382 @@
 import OpenAI from 'openai';
+import { logger } from '../utils/logger';
 
-export interface ContentIdea {
-  title: string;
-  description: string;
-  tags: string[];
-  category: string;
-  script: string;
-  hook: string;
-  thumbnail_text: string;
+export interface ContentRequest {
+  topic: string;
+  style: 'educational' | 'entertainment' | 'news' | 'tutorial' | 'review';
+  duration: number; // in seconds
+  audience: 'kids' | 'teens' | 'adults' | 'general';
+  language?: string;
 }
 
-export interface VideoScript {
-  hook: string;
-  introduction: string;
-  main_points: string[];
-  conclusion: string;
-  call_to_action: string;
-  full_script: string;
+export interface GeneratedContent {
+  success: boolean;
+  title?: string;
+  description?: string;
+  script?: string;
+  tags?: string[];
+  thumbnail_prompt?: string;
+  error?: string;
 }
 
-class ContentGenerator {
-  private openai: OpenAI;
+export class ContentGenerator {
+  public openai: OpenAI; // FIXED: Changed from private to public
 
   constructor() {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
-      console.error('❌ OpenAI API key missing');
-      return;
+      throw new Error('OpenAI API key is required');
     }
+    
+    this.openai = new OpenAI({
+      apiKey: apiKey
+    });
 
-    this.openai = new OpenAI({ apiKey });
-    console.log('✅ OpenAI Content Generator initialized');
+    logger.info('✅ Content Generator initialized');
   }
 
-  /**
-   * Generate trending video ideas
-   */
-  async generateVideoIdeas(niche: string, count: number = 5): Promise<ContentIdea[]> {
+  // Generate video content based on request
+  async generateVideoContent(request: ContentRequest): Promise<GeneratedContent> {
     try {
-      const prompt = `Generate ${count} viral YouTube video ideas for the ${niche} niche. 
+      logger.info(`🎬 Generating content for topic: ${request.topic}`);
+
+      // Generate title
+      const title = await this.generateTitle(request);
       
-      Focus on:
-      - Trending topics and current events
-      - High-engagement formats (lists, how-to, facts)
-      - SEO-optimized titles
-      - Click-worthy but not clickbait
-      - Evergreen content that stays relevant
+      // Generate description
+      const description = await this.generateDescription(request, title);
       
-      For each idea, provide:
-      1. Catchy title (under 60 characters)
-      2. Compelling description (2-3 sentences)
-      3. 10-15 relevant tags
-      4. Video category
-      5. Brief video script outline
-      6. Opening hook (first 15 seconds)
-      7. Thumbnail text (2-4 words)
+      // Generate script
+      const script = await this.generateScript(request, title);
       
-      Return as JSON array with objects containing: title, description, tags, category, script, hook, thumbnail_text`;
+      // Generate tags
+      const tags = await this.generateTags(request, title);
+      
+      // Generate thumbnail prompt
+      const thumbnail_prompt = await this.generateThumbnailPrompt(request, title);
 
-      const response = await this.openai.chat.completions.create({
-        model: 'gpt-4',
-        messages: [
-          {
-            role: 'system',
-            content: 'You are a viral YouTube content strategist. Create engaging, original video ideas that follow YouTube best practices.'
-          },
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
-        temperature: 0.8,
-        max_tokens: 3000
-      });
+      const result: GeneratedContent = {
+        success: true,
+        title,
+        description,
+        script,
+        tags,
+        thumbnail_prompt
+      };
 
-      const content = response.choices[0].message.content;
-      return JSON.parse(content || '[]');
+      logger.info(`✅ Content generated successfully for: ${title}`);
+      return result;
 
     } catch (error: any) {
-      console.error('❌ Failed to generate video ideas:', error.message);
-      throw error;
+      logger.error('❌ Content generation failed:', error);
+      return {
+        success: false,
+        error: error.message
+      };
     }
   }
 
-  /**
-   * Generate detailed video script
-   */
-  async generateScript(topic: string, duration: number = 300): Promise<VideoScript> {
+  // Generate engaging title
+  private async generateTitle(request: ContentRequest): Promise<string> {
     try {
-      const prompt = `Create a detailed ${duration}-second YouTube video script about: "${topic}"
+      const prompt = `Generate an engaging YouTube title for a ${request.style} video about "${request.topic}" 
+        targeted at ${request.audience} audience. The title should be:
+        - Attention-grabbing and clickable
+        - SEO-friendly
+        - Under 60 characters
+        - Relevant to the topic
+        
+        Topic: ${request.topic}
+        Style: ${request.style}
+        Audience: ${request.audience}
+        
+        Return only the title, nothing else.`;
 
-      Structure:
-      1. Hook (0-15 seconds) - Grab attention immediately
-      2. Introduction (15-30 seconds) - What they'll learn
-      3. Main content (60-80% of video) - Core information with smooth transitions
-      4. Conclusion (last 30 seconds) - Summarize key points
-      5. Call to action - Subscribe, like, comment
-
-      Requirements:
-      - Conversational, engaging tone
-      - Keep viewers watching (retention hooks)
-      - Include specific facts and examples
-      - Natural pauses for text overlays
-      - Strong opening and closing
-
-      Return as JSON with: hook, introduction, main_points (array), conclusion, call_to_action, full_script`;
-
-      const response = await this.openai.chat.completions.create({
-        model: 'gpt-4',
-        messages: [
-          {
-            role: 'system',
-            content: 'You are a professional YouTube scriptwriter. Create engaging, well-structured scripts that maximize viewer retention.'
-          },
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
-        temperature: 0.7,
-        max_tokens: 2500
+      const completion = await this.openai.chat.completions.create({
+        model: "gpt-4",
+        messages: [{ role: "user", content: prompt }],
+        max_tokens: 100,
+        temperature: 0.8
       });
 
-      const content = response.choices[0].message.content;
-      return JSON.parse(content || '{}');
+      return completion.choices[0]?.message?.content?.trim() || `${request.topic} - Complete Guide`;
 
     } catch (error: any) {
-      console.error('❌ Failed to generate script:', error.message);
-      throw error;
+      logger.error('❌ Title generation failed:', error);
+      return `${request.topic} - Complete Guide`;
     }
   }
 
-  /**
-   * Generate SEO-optimized title variations
-   */
-  async generateTitles(topic: string, count: number = 5): Promise<string[]> {
+  // Generate video description
+  private async generateDescription(request: ContentRequest, title: string): Promise<string> {
     try {
-      const prompt = `Generate ${count} SEO-optimized YouTube titles for: "${topic}"
+      const prompt = `Write a compelling YouTube video description for a video titled "${title}".
+        The video is about "${request.topic}" in ${request.style} style for ${request.audience} audience.
+        
+        The description should:
+        - Be engaging and informative
+        - Include relevant keywords for SEO
+        - Be around 150-200 words
+        - Include a call-to-action
+        - Have proper formatting with line breaks
+        
+        Topic: ${request.topic}
+        Style: ${request.style}
+        Duration: ${Math.floor(request.duration / 60)} minutes`;
 
-      Requirements:
-      - Under 60 characters
-      - Include power words (Ultimate, Secret, Amazing, etc.)
-      - Use numbers when possible
-      - Create curiosity without clickbait
-      - Include relevant keywords
-      - Mix of different formats (How to, List, Question, etc.)
-
-      Return as JSON array of strings.`;
-
-      const response = await this.openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
-        messages: [
-          {
-            role: 'system',
-            content: 'You are a YouTube SEO expert. Create titles that rank well and get clicks.'
-          },
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
-        temperature: 0.8,
-        max_tokens: 500
+      const completion = await this.openai.chat.completions.create({
+        model: "gpt-4",
+        messages: [{ role: "user", content: prompt }],
+        max_tokens: 300,
+        temperature: 0.7
       });
 
-      const content = response.choices[0].message.content;
-      return JSON.parse(content || '[]');
+      return completion.choices[0]?.message?.content?.trim() || 
+        `Learn everything about ${request.topic} in this comprehensive ${request.style} video. Perfect for ${request.audience} audience!`;
 
     } catch (error: any) {
-      console.error('❌ Failed to generate titles:', error.message);
-      throw error;
+      logger.error('❌ Description generation failed:', error);
+      return `Learn everything about ${request.topic} in this comprehensive ${request.style} video.`;
     }
   }
 
-  /**
-   * Generate video description with SEO
-   */
-  async generateDescription(title: string, script: string): Promise<string> {
+  // Generate video script
+  private async generateScript(request: ContentRequest, title: string): Promise<string> {
     try {
-      const prompt = `Create a YouTube video description for: "${title}"
+      const durationMinutes = Math.floor(request.duration / 60);
+      
+      const prompt = `Create a detailed video script for a ${durationMinutes}-minute YouTube video titled "${title}".
+        
+        Video Details:
+        - Topic: ${request.topic}
+        - Style: ${request.style}
+        - Audience: ${request.audience}
+        - Duration: ${durationMinutes} minutes
+        
+        Script Requirements:
+        - Include engaging hook in first 15 seconds
+        - Clear structure with introduction, main content, and conclusion
+        - Natural, conversational tone
+        - Include timing cues [00:00]
+        - Add call-to-action for likes and subscribes
+        - Make it educational and valuable
+        
+        Format the script with clear sections and timing markers.`;
 
-      Based on this script: "${script.substring(0, 500)}..."
-
-      Include:
-      - Compelling first 2 lines (visible without "show more")
-      - Key points covered in the video
-      - Relevant hashtags (3-5)
-      - Call to action to subscribe
-      - Social media links placeholder
-      - Timestamps if applicable
-
-      Keep it under 1000 characters for the main description.`;
-
-      const response = await this.openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
-        messages: [
-          {
-            role: 'system',
-            content: 'You are a YouTube SEO specialist. Write descriptions that improve discoverability and engagement.'
-          },
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
-        temperature: 0.6,
-        max_tokens: 800
+      const completion = await this.openai.chat.completions.create({
+        model: "gpt-4",
+        messages: [{ role: "user", content: prompt }],
+        max_tokens: 1500,
+        temperature: 0.7
       });
 
-      return response.choices[0].message.content || '';
+      return completion.choices[0]?.message?.content?.trim() || 
+        `[00:00] Welcome to today's video about ${request.topic}!\n\n[00:15] In this video, we'll explore everything you need to know about ${request.topic}.\n\n[01:00] Thank you for watching! Don't forget to like and subscribe!`;
 
     } catch (error: any) {
-      console.error('❌ Failed to generate description:', error.message);
-      throw error;
+      logger.error('❌ Script generation failed:', error);
+      return `Welcome to today's video about ${request.topic}! In this video, we'll explore everything you need to know about this topic.`;
     }
   }
 
-  /**
-   * Generate relevant tags for better discoverability
-   */
-  async generateTags(title: string, description: string): Promise<string[]> {
+  // Generate relevant tags
+  private async generateTags(request: ContentRequest, title: string): Promise<string[]> {
     try {
-      const prompt = `Generate 15-20 YouTube tags for this video:
-      Title: "${title}"
-      Description: "${description.substring(0, 200)}..."
+      const prompt = `Generate 15-20 relevant YouTube tags for a video titled "${title}" about "${request.topic}".
+        
+        Video Details:
+        - Topic: ${request.topic}
+        - Style: ${request.style}
+        - Audience: ${request.audience}
+        
+        Tags should be:
+        - SEO-friendly
+        - Mix of specific and broad terms
+        - Relevant to the content
+        - Help with discoverability
+        
+        Return tags as a comma-separated list.`;
 
-      Include:
-      - Primary keywords from title
-      - Related search terms
-      - Niche-specific tags
-      - Long-tail keywords
-      - Trending hashtags
-
-      Return as JSON array of strings. Keep tags under 50 characters each.`;
-
-      const response = await this.openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
-        messages: [
-          {
-            role: 'system',
-            content: 'You are a YouTube SEO expert. Generate tags that improve video discoverability.'
-          },
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
-        temperature: 0.7,
-        max_tokens: 600
+      const completion = await this.openai.chat.completions.create({
+        model: "gpt-4",
+        messages: [{ role: "user", content: prompt }],
+        max_tokens: 200,
+        temperature: 0.6
       });
 
-      const content = response.choices[0].message.content;
-      return JSON.parse(content || '[]');
+      const tagsString = completion.choices[0]?.message?.content?.trim() || '';
+      return tagsString.split(',').map(tag => tag.trim()).filter(tag => tag.length > 0);
 
     } catch (error: any) {
-      console.error('❌ Failed to generate tags:', error.message);
-      throw error;
+      logger.error('❌ Tags generation failed:', error);
+      return [request.topic, request.style, 'tutorial', 'guide', 'howto'];
     }
   }
 
-  /**
-   * Analyze trending topics for content ideas
-   */
-  async analyzeTrends(industry: string): Promise<string[]> {
+  // Generate thumbnail prompt for AI image generation
+  private async generateThumbnailPrompt(request: ContentRequest, title: string): Promise<string> {
     try {
-      const prompt = `What are the top 10 trending topics in ${industry} right now that would make great YouTube content?
+      const prompt = `Create a detailed prompt for generating a YouTube thumbnail image for a video titled "${title}".
+        
+        Video Details:
+        - Topic: ${request.topic}
+        - Style: ${request.style}
+        - Audience: ${request.audience}
+        
+        The prompt should describe:
+        - Visual elements that represent the topic
+        - Color scheme that's eye-catching
+        - Text placement and style
+        - Overall composition
+        - Make it click-worthy and professional
+        
+        Return only the image generation prompt.`;
 
-      Focus on:
-      - Current events and news
-      - Seasonal trends
-      - Popular searches
-      - Emerging technologies or methods
-      - Common problems people are searching for
-
-      Return as JSON array of trending topic strings.`;
-
-      const response = await this.openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
-        messages: [
-          {
-            role: 'system',
-            content: 'You are a trend analysis expert. Identify current topics with high search volume and engagement potential.'
-          },
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
-        temperature: 0.6,
-        max_tokens: 800
+      const completion = await this.openai.chat.completions.create({
+        model: "gpt-4",
+        messages: [{ role: "user", content: prompt }],
+        max_tokens: 150,
+        temperature: 0.7
       });
 
-      const content = response.choices[0].message.content;
-      return JSON.parse(content || '[]');
+      return completion.choices[0]?.message?.content?.trim() || 
+        `Professional YouTube thumbnail with "${title}" text, vibrant colors, clean design, ${request.topic} related imagery`;
 
     } catch (error: any) {
-      console.error('❌ Failed to analyze trends:', error.message);
-      throw error;
+      logger.error('❌ Thumbnail prompt generation failed:', error);
+      return `Professional YouTube thumbnail about ${request.topic} with vibrant colors and clean design`;
     }
   }
 
-  /**
-   * Check if service is configured
-   */
-  isConfigured(): boolean {
-    return !!process.env.OPENAI_API_KEY;
+  // PUBLIC METHOD: Analyze video content for trending potential
+  public async analyzeVideoContent(video: any): Promise<any> {
+    try {
+      const prompt = `Analyze this YouTube video for content creation insights:
+        
+        Title: ${video.title}
+        Description: ${video.description?.substring(0, 200) || 'No description'}
+        Views: ${video.viewCount}
+        Likes: ${video.likeCount}
+        Comments: ${video.commentCount}
+        
+        Provide analysis on:
+        1. Why this video is trending
+        2. Key elements that make it engaging
+        3. Content creation opportunities
+        4. Target audience insights
+        5. Replication potential (1-10 score)
+        
+        Return as JSON object with these fields: reason, elements, opportunities, audience, replicationScore`;
+
+      const completion = await this.openai.chat.completions.create({
+        model: "gpt-4",
+        messages: [{ role: "user", content: prompt }],
+        max_tokens: 400,
+        temperature: 0.6
+      });
+
+      const analysisText = completion.choices[0]?.message?.content?.trim() || '{}';
+      
+      try {
+        return JSON.parse(analysisText);
+      } catch {
+        return {
+          reason: "Analysis failed",
+          elements: [],
+          opportunities: [],
+          audience: "general",
+          replicationScore: 5
+        };
+      }
+
+    } catch (error: any) {
+      logger.error('❌ Video content analysis failed:', error);
+      return {
+        reason: "Analysis failed",
+        elements: [],
+        opportunities: [],
+        audience: "general",
+        replicationScore: 1
+      };
+    }
+  }
+
+  // Generate content ideas based on trending topics
+  async generateContentIdeas(topics: string[], count: number = 5): Promise<ContentRequest[]> {
+    try {
+      logger.info(`💡 Generating ${count} content ideas from trending topics`);
+
+      const ideas: ContentRequest[] = [];
+
+      for (let i = 0; i < Math.min(count, topics.length); i++) {
+        const topic = topics[i];
+        
+        const idea: ContentRequest = {
+          topic: topic,
+          style: this.getRandomStyle(),
+          duration: this.getRandomDuration(),
+          audience: this.getRandomAudience(),
+          language: 'en'
+        };
+
+        ideas.push(idea);
+      }
+
+      logger.info(`✅ Generated ${ideas.length} content ideas`);
+      return ideas;
+
+    } catch (error: any) {
+      logger.error('❌ Content ideas generation failed:', error);
+      return [];
+    }
+  }
+
+  // Helper methods
+  private getRandomStyle(): 'educational' | 'entertainment' | 'news' | 'tutorial' | 'review' {
+    const styles: ('educational' | 'entertainment' | 'news' | 'tutorial' | 'review')[] = 
+      ['educational', 'entertainment', 'tutorial', 'review'];
+    return styles[Math.floor(Math.random() * styles.length)];
+  }
+
+  private getRandomDuration(): number {
+    const durations = [60, 120, 180, 300, 420, 600]; // 1-10 minutes
+    return durations[Math.floor(Math.random() * durations.length)];
+  }
+
+  private getRandomAudience(): 'kids' | 'teens' | 'adults' | 'general' {
+    const audiences: ('kids' | 'teens' | 'adults' | 'general')[] = ['teens', 'adults', 'general'];
+    return audiences[Math.floor(Math.random() * audiences.length)];
+  }
+
+  // Generate voiceover script from regular script
+  async generateVoiceoverScript(script: string): Promise<string> {
+    try {
+      const prompt = `Convert this video script into a natural voiceover script:
+        
+        Original Script:
+        ${script}
+        
+        Requirements:
+        - Remove timing markers and stage directions
+        - Make it flow naturally for text-to-speech
+        - Keep the educational value
+        - Maintain engaging tone
+        - Add natural pauses with periods
+        
+        Return only the clean voiceover text.`;
+
+      const completion = await this.openai.chat.completions.create({
+        model: "gpt-4",
+        messages: [{ role: "user", content: prompt }],
+        max_tokens: 1000,
+        temperature: 0.5
+      });
+
+      return completion.choices[0]?.message?.content?.trim() || script;
+
+    } catch (error: any) {
+      logger.error('❌ Voiceover script generation failed:', error);
+      return script; // Return original script as fallback
+    }
   }
 }
-
-export default new ContentGenerator();
