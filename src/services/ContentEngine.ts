@@ -8,7 +8,7 @@ import ffmpeg from 'fluent-ffmpeg';
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
 
-interface TrendingVideo {
+export interface TrendingVideo {
   id: string;
   title: string;
   description: string;
@@ -20,7 +20,7 @@ interface TrendingVideo {
   category: string;
 }
 
-interface VideoScript {
+export interface VideoScript {
   title: string;
   description: string;
   script: string;
