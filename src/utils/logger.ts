@@ -1,8 +1,8 @@
 export const logger = {
-  info: (msg: any) => console.log(msg),
-  warn: (msg: any) => console.warn(msg),
-  error: (msg: any) => console.error(msg),
-  debug: (msg: any) => console.log(msg)
+  info: (...args: any[]) => console.log(...args),
+  warn: (...args: any[]) => console.warn(...args),
+  error: (...args: any[]) => console.error(...args),
+  debug: (...args: any[]) => console.log(...args)
 };
 
 export default logger;
