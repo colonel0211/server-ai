@@ -1,4 +1,3 @@
-// src/services/automationScheduler.ts - FIXED VERSION
 import cron from 'node-cron';
 import { YouTubeContentEngine } from './ContentEngine';
 import { VideoProducer } from './videoProducer';
