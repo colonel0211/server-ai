@@ -3,9 +3,15 @@
 import fs from 'fs-extra';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
+// Import necessary libraries for video creation
+// import ffmpeg from 'fluent-ffmpeg'; // You'll need to install and configure this
+// import sharp from 'sharp';      // You'll need to install and configure this
+// import { createSpeech } from 'openai'; // If OpenAI TTS is used here directly
+// Import your logger
+import { logger } from '../utils/logger'; 
 
 // --- IMPORT NECESSARY TYPES FROM CONTENTENGINE ---
-// Make sure these imports are correct based on your file structure
+// Adjust path if necessary
 import { VideoScript } from './ContentEngine'; 
 
 // --- INTERFACE FOR VIDEO CONFIG (WHAT createVideo EXPECTS) ---
@@ -31,60 +37,56 @@ export interface VideoProductionResult {
 export class VideoProducer {
 
   constructor() {
-    // Initialize any dependencies if needed (e.g., FFmpeg path, external services)
+    // Initialize any dependencies here
+    // Example: configure ffmpeg path if needed
+    // if (process.env.FFMPEG_PATH) {
+    //   ffmpeg.setFfmpegPath(process.env.FFMPEG_PATH);
+    // }
   }
 
-  // This is the core method that creates the video file from a script and config.
-  // YOU NEED TO IMPLEMENT THE ACTUAL VIDEO CREATION LOGIC HERE.
-  // It's likely you'll use parts of the FFmpeg/Sharp logic you had in ContentEngine's createVideo.
+  // --- IMPLEMENT YOUR ACTUAL VIDEO CREATION LOGIC HERE ---
   async createVideo(config: VideoConfig): Promise<VideoProductionResult> {
     try {
-      console.log(`🎬 VideoProducer: Creating video for niche "${config.niche}" with style "${config.style}"...`);
+      logger.info(`🎬 VideoProducer: Creating video for niche "${config.niche}" with style "${config.style}" and duration ${config.duration}s...`);
       
-      // Generate a unique ID for this produced video
       const videoId = uuidv4();
-      // Define a temporary directory for this video's assets
-      const tempDir = path.join(process.cwd(), 'temp_producer', videoId);
+      const tempDir = path.join(process.cwd(), 'temp_producer', videoId); // Use a distinct temp dir
       await fs.ensureDir(tempDir);
 
-      // --- PLACEHOLDER FOR VIDEO CREATION LOGIC ---
-      // You will need to integrate your video creation process here.
-      // This might involve:
-      // 1. Generating audio from script (using TTS)
-      // 2. Generating visuals (using AI image/video gen or stock assets)
-      // 3. Assembling audio and visuals with FFmpeg
-      // 4. Generating a thumbnail
+      // --- VIDEO CREATION LOGIC GOES HERE ---
+      // You'll integrate your actual video assembly using FFmpeg, Sharp, etc.
+      // You might also call OpenAI TTS for voiceover, AI image generation for visuals, etc.
+      // For now, this is a placeholder simulating success.
 
-      // Example: Simulate video creation success
-      console.log("Video creation logic placeholder: Simulating success...");
-      
-      // Replace this simulation with your actual video creation process
-      // For demonstration, let's just create a dummy file
+      logger.info("VideoProducer: Placeholder for actual video creation logic.");
       const dummyVideoPath = path.join(tempDir, `produced_video_${videoId}.mp4`);
-      await fs.writeFile(dummyVideoPath, `Dummy video content for ID: ${videoId}`);
-      console.log(`Video asset created at: ${dummyVideoPath}`);
+      // Simulate creating a file
+      await fs.writeFile(dummyVideoPath, `Dummy video content for ID: ${videoId}. Config: ${JSON.stringify(config)}`);
+      logger.info(`Video asset created at: ${dummyVideoPath}`);
+      
+      // --- END OF VIDEO CREATION LOGIC ---
 
-      // Return the success object
+      // Return the success object with the video ID and file path
       return { success: true, videoId: videoId, filePath: dummyVideoPath };
       
     } catch (error: any) {
-      console.error('❌ VideoProducer: Error during video creation:', error.message);
-      // Return the error object
+      logger.error('❌ VideoProducer: Error during video creation:', error.message);
+      // Return an error object
       return { success: false, error: error.message };
     }
   }
   
-  // Cleanup temporary files created by this producer
+  // Method to clean up temporary files created by this producer
   async cleanup(): Promise<void> {
-    console.log("VideoProducer: Cleaning up temporary directories...");
+    logger.info("VideoProducer: Cleaning up temporary directories...");
     try {
       const tempDir = path.join(process.cwd(), 'temp_producer');
       if (await fs.pathExists(tempDir)) {
         await fs.remove(tempDir);
-        console.log(`Cleaned up temporary directory: ${tempDir}`);
+        logger.info(`Cleaned up temporary directory: ${tempDir}`);
       }
     } catch (error: any) {
-      console.error('VideoProducer: Error during cleanup:', error.message);
+      logger.error('VideoProducer: Error during cleanup:', error.message);
     }
   }
 }
