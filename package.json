@@ -34,7 +34,6 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
     "axios": "^1.7.7",
-    "canvas": "^2.11.2",
     "compression": "^1.7.4",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
@@ -49,8 +48,8 @@
     "node-cron": "^3.0.3",
     "openai": "^4.67.3",
     "sharp": "^0.33.5",
-    "winston": "^3.15.0",
-    "uuid": "^10.0.0"
+    "uuid": "^10.0.0",
+    "winston": "^3.15.0"
   },
   "devDependencies": {
     "@types/compression": "^1.7.5",
